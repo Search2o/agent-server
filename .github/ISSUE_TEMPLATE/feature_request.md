@@ -1,26 +1,20 @@
 ---
 name: Feature request
-about: Suggest an idea for Search2o
+about: Suggest an idea for this project
 title: ''
 labels: ''
 assignees: ''
 
 ---
 
----
+**Is your feature request related to a problem? Please describe.**
+A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
 
-name: Feature request
-about: Suggest an improvement to Search2o
-title: "[Feature] "
-labels: enhancement
-assignees: ""
--------------
+**Describe the solution you'd like**
+A clear and concise description of what you want to happen.
 
-**What would you like?**
-Describe the feature or change.
+**Describe alternatives you've considered**
+A clear and concise description of any alternative solutions or features you've considered.
 
-**What problem does it solve?**
-Describe the need or use case.
-
-**Alternatives considered**
-Optional: describe any alternatives you have considered.
+**Additional context**
+Add any other context or screenshots about the feature request here.
