@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "search2o"
+version = "0.2.0"
+description = "Search2o Agent Server"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE.md"]
+authors = [{ name = "Search2o", email = "info@search2o.com" }]
+keywords = ["search", "agent", "agents", "llm", "ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3 :: Only",
+    "Framework :: FastAPI",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "fastapi>=0.141,<1.0",
+    "uvicorn[standard]>=0.35,<1.0",
+    "pydantic[email]>=2.12,<3.0",
+    "httpx>=0.28,<1.0",
+    "cryptography>=46.0",
+    "sqlalchemy>=2.0,<3.0",
+    "aiosqlite>=0.20,<1.0",
+    "mcp>=1.29,<2.0",
+    "fastmcp-slim[client]>=3.4,<4.0",
+]
+
+[project.optional-dependencies]
+postgres = ["asyncpg>=0.30,<1.0"]
+mysql = ["aiomysql>=0.2,<1.0"]
+oracle = ["oracledb>=3.0,<5.0"]
+mssql = ["aioodbc>=0.5,<1.0"]
+db = [
+    "asyncpg>=0.30,<1.0",
+    "aiomysql>=0.2,<1.0",
+    "oracledb>=3.0,<5.0",
+]
+
+[project.urls]
+Homepage = "https://search2o.com"
+Repository = "https://github.com/Search2o/agent-server"
+
+[project.scripts]
+search2o = "search2o.main:cli"
+
+[tool.setuptools.packages.find]
+include = ["search2o*"]
+
+[tool.setuptools.package-data]
+search2o = ["ui/**/*"]

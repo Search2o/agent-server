@@ -1,0 +1,15 @@
+/.idea/
+
+# Bundled UI (built artifact, not source)
+/search2o/ui/
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+.coverage
+/dist/
+/build/
+*.egg-info/
+
+# Virtual environment
+/.venv/
