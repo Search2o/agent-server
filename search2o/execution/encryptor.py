@@ -93,7 +93,7 @@ class Encryptor:
                     key_to_key: str = model.keys[-1].keyName
                 except IndexError:
                     raise ShowMessage("No encryption key defined")
-                kf = runtime.allowlist.eval_allowlist.get(model.keyFunction)
+                kf = runtime.key_function
                 if kf:
                     key = await kf(key_to_key)
                 else:
@@ -134,7 +134,7 @@ class Encryptor:
         try:
             marker, version, key_to_key, payload = cls._split_marker(encrypted_text)
             if marker == cls.CLIENT_ENCRYPTION_MARKER:
-                kf = runtime.allowlist.eval_allowlist.get(runtime.encryption_model.keyFunction)
+                kf = runtime.key_function
                 if kf:
                     key = await kf(key_to_key)
                 else:
@@ -151,7 +151,7 @@ class Encryptor:
             raise ShowMessage(f"Unexpected decryption error: {error_message(e)}")
 
     @classmethod
-    async def decrypt_query(
+    async def decrypt_str(
             cls,
             request: Request,
             encrypted_text: str
@@ -160,7 +160,7 @@ class Encryptor:
         return await cls.decrypt(request, Runtime.current(), encrypted_text)
 
     @classmethod
-    async def encrypt_query(
+    async def encrypt_str(
             cls,
             request: Request,
             plaintext: str

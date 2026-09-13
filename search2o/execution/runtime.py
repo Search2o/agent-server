@@ -9,7 +9,7 @@ import asyncio
 import json
 import types
 from typing import Any, ClassVar, TypeVar
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 
 from fastapi import Request
 from pydantic import BaseModel
@@ -48,6 +48,7 @@ class RuntimeState:
         self.validation: AgentValidationModel
         self.secrets_model: AgentSecretsModel
         self.encryption_model: EncryptionModel
+        self.key_function: Callable | None = None
         self.allowlist: Allowlist
         self.sysvar: SysVar
 
@@ -75,6 +76,13 @@ class RuntimeState:
         # Build the allowlist BEFORE decrypting hosted secrets: client-encrypted
         new_allowlist_model = self._d2m(ar, SystemConfigPart.allowlist)
         self.allowlist = Allowlist(new_allowlist_model) if new_allowlist_model is not None else prev.allowlist
+
+        if self.encryption_model.keyFunction:
+            self.key_function = self.allowlist.resolve_function(self.encryption_model.keyFunction)
+            if self.key_function is None:
+                raise InitializationError(f"Encryption key function '{self.encryption_model.keyFunction}' could not be loaded.")
+        else:
+            self.key_function = None
 
         if AgentConfigPart.prompt in ar.updatedAgentConfigs:
             for profile in self.prompts.values():
@@ -136,12 +144,15 @@ class RuntimeState:
 
     @staticmethod
     async def execute_expr(ce: str | types.CodeType, d: dict) -> Any:
-        exec(ce, d)
         value_name = "_tmp_value_"
-        if value_name not in d:
-            raise ShowMessage("Unexpected internal error in evaluating an expression.")
-        ret = d[value_name]
-        d.pop(value_name, None)
+        try:
+            exec(ce, d)
+            if value_name not in d:
+                raise ShowMessage("Unexpected internal error in evaluating an expression.")
+            ret = d[value_name]
+        finally:
+            d.pop(value_name, None)
+            d.pop("_tmp_func_", None)
         if isinstance(ret, Awaitable):
             ret = await ret
         return ret
@@ -172,8 +183,12 @@ class RuntimeState:
 
 class Runtime:
     _current: RuntimeState = RuntimeState()
+    account_name: ClassVar[str] = ""
+    server_ip: ClassVar[str] = ""
+    docs_web: ClassVar[str] = ""
     password_help: ClassVar[str] = ""
     auth_method: ClassVar[AuthMethod] = AuthMethod.builtin
+    is_builtin_allowed: ClassVar[bool] = True
     _update_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
     _bg_tasks: ClassVar[set[asyncio.Task]] = set()
     _running: ClassVar[dict[str, int]] = {}
@@ -248,8 +263,12 @@ class Runtime:
         from search2o.common.rest_call import RestCall
         rt0 = (await RestCall.call_method(request, "getRuntime", {"lastUpdatedAt": update_at})).get("runtime")
         rt = AgentRuntime.model_validate(rt0)
+        cls.account_name = rt.accountName
+        cls.server_ip = rt.serverIp
+        cls.docs_web = rt.docsweb
         cls.password_help = rt.passwordHelp
         cls.auth_method = rt.authMethod
+        cls.is_builtin_allowed = rt.isBuiltinAllowed
         cls._remove_stale_agents(rt.agentVersions)
         if update_at == 0:
             cls.initial_update_check(rt)

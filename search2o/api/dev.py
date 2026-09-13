@@ -27,7 +27,7 @@ from search2o.models.configtypes import AgentName, AgentTag
 from search2o.models.apimodels import AgentTitle, BaseResponseModel, ConvId, \
     DraftResponseModel, EmptyRequestModel, PagedRequestModel, ReportWindow, RequestModel, SearchQuery, \
     ValidateDraftResponseModel
-from search2o.models.schemaobjects import AgentExecResult, AgentType, DescriptorModel, NotificationType, UserRole, \
+from search2o.models.schemaobjects import AgentExecResult, AgentType, DescriptorModel, NotificationType, \
     ValidationResult, ValidationResults, ValidationResultType
 
 dev_router = APIRouter(prefix="/api/dev", tags=["dev"])
@@ -157,6 +157,7 @@ class SaveDraftNewModel(RequestModel):
     agentTag: AgentTag | None = Field(default=None, description="Omit to leave unchanged.")
     agentDefinition: _AgentDefinition | None = Field(default=None, description="Omit to leave unchanged.")
     validationQuery: str | None = Field(default=None, max_length=2000, description="Omit to leave unchanged.")
+    usedProfiles: dict[str, list[str]] | None = Field(default=None, description="The configuration profiles this draft would use, as profile type to names. It is a hint for writing the agent, and can go out of date as the draft is edited. Omit to leave unchanged.")
 
 
 @dev_router.post("/saveDraftNew", response_model=BaseResponseModel, summary="Update a draft for a new agent",
@@ -172,6 +173,7 @@ class SaveDraftAgentModel(RequestModel):
     agentTitle: AgentTitle | None = Field(default=None, description="Omit to leave unchanged.")
     agentDefinition: _AgentDefinition | None = Field(default=None, description="Omit to leave unchanged.")
     validationQuery: str | None = Field(default=None, max_length=2000, description="Omit to leave unchanged.")
+    usedProfiles: dict[str, list[str]] | None = Field(default=None, description="The configuration profiles this draft would use, as profile type to names. It is a hint for writing the agent, and can go out of date as the draft is edited. Omit to leave unchanged.")
 
 
 @dev_router.post("/saveDraftAgent", response_model=BaseResponseModel, summary="Update a draft of an existing agent",
@@ -182,20 +184,20 @@ async def saveDraftAgent(item: SaveDraftAgentModel, request: Request) -> BaseRes
     return BaseResponseModel.model_validate(ret)
 
 
-class SaveMergedDraftModel(RequestModel):
-    draftid: str = Field(..., description="Draft to update.")
-    agentDefinition: _AgentDefinition = Field(..., description="The merged agent definition.")
-    agentVersion: int = Field(..., description="Version the merge was based on. The save is rejected if the draft has moved on since.")
+class MergeDraftResponseModel(BaseResponseModel):
+    agentDefinition: AgentType = Field(default="", description="The merged agent definition, which has been saved to the draft.", title="Agent definition")
+    agentVersion: int = Field(default=0, description="Version of the published agent the draft was merged with, in epoch milliseconds.", json_schema_extra={"format": "int64"}, title="Agent version")
 
 
-@dev_router.post("/saveMergedDraft", response_model=BaseResponseModel, summary="Update a draft agent", description="Update an existing draft agent.")
-async def saveMergedDraft(item: SaveMergedDraftModel, request: Request) -> BaseResponseModel:
-    _check_definition_length(item.agentDefinition)
+@dev_router.post("/mergeDraft", response_model=MergeDraftResponseModel, summary="Merge a draft with its published agent",
+                 description="Reconciles a draft of an existing agent with the version of that agent published since the draft was created, and saves the result. The merged definition is produced for you and returned, so nothing about it is sent in. Use this when getDraft reports draftAgentHasChanged.")
+async def mergeDraft(item: DraftidModel, request: Request) -> MergeDraftResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
-    return BaseResponseModel.model_validate(ret)
+    return MergeDraftResponseModel.model_validate(ret)
 
 
 class DraftHelpModel(RequestModel):
+    draftid: str = Field(..., title="Draft ID", description="The draft ID.")
     userPrompt: str = Field(..., min_length=8, max_length=10000, description="What the developer wants the agent to do.")
 
 
@@ -324,7 +326,7 @@ async def getDescriptor(item: AgentNameModel, request: Request) -> GetDescriptor
     if isinstance(descriptor, str) and descriptor:
         try:
             ret["descriptor"] = DescriptorModel.model_validate_json(
-                await Encryptor.decrypt_query(request, descriptor))
+                await Encryptor.decrypt_str(request, descriptor))
         except Exception:
             ret["descriptor"] = DescriptorModel(description="Decryption error")
     elif isinstance(descriptor, str):
@@ -345,7 +347,7 @@ class PublishDescriptorResponseModel(JobSubmittedResponseModel):
 @dev_router.post("/publishDescriptor", response_model=PublishDescriptorResponseModel, summary="Publish an agent descriptor",
                  description="Publish an agent descriptor. This submits a background job that indexes the agent descriptor in the search engine; poll getIndexStatus with the returned jobid to track it. Indexing can take several minutes.")
 async def publishDescriptor(item: PublishDescriptorModel, request: Request) -> PublishDescriptorResponseModel:
-    encrypted = await Encryptor.encrypt_query(request, item.descriptor.model_dump_json())
+    encrypted = await Encryptor.encrypt_str(request, item.descriptor.model_dump_json())
     ret = await RestCall.passthrough(request, {**item.model_dump(), "encrypted": encrypted})
     return PublishDescriptorResponseModel.model_validate(ret)
 
@@ -441,9 +443,23 @@ class ApiConnectionPoolNamesResponseModel(BaseResponseModel):
 
 @dev_router.post("/getApiConnectionPoolNames", response_model=ApiConnectionPoolNamesResponseModel, summary="Get the API connection pool names", description="Gets the names of the API connection pools defined in the system. LLM profiles, API profiles and agent server configs must use one of the pools named here.")
 async def getApiConnectionPoolNames(item: EmptyRequestModel, request: Request) -> ApiConnectionPoolNamesResponseModel:
-    await RestCall.call_method(request, "checkRole", {"role": UserRole.developer})
     return ApiConnectionPoolNamesResponseModel(success=True,
                                                apiConnectionPoolNames=await api_connection_pool_names(request))
+
+
+class ProfileInfoModel(BaseModel):
+    name: str = Field(..., description="The name the profile is referred to by in agents and other configuration.")
+    doc: str = Field(..., description="Free-text notes describing what the profile is for.")
+
+
+class ProfilesResponseModel(BaseResponseModel):
+    profiles: dict[str, list[ProfileInfoModel]] = Field(default_factory=dict, description="The configured profiles, grouped by type: llm, api, mcp, db and prompt. Each entry carries the profile's name and its documentation.")
+
+
+@dev_router.post("/getProfiles", response_model=ProfilesResponseModel, summary="Get the configured profiles", description="Gets every configured profile, grouped by type (llm, api, mcp, db, prompt), each with its name and documentation. Useful when writing agents that reference profiles.")
+async def getProfiles(item: EmptyRequestModel, request: Request) -> ProfilesResponseModel:
+    ret = await RestCall.passthrough(request, item.model_dump())
+    return ProfilesResponseModel.model_validate(ret)
 
 
 class ValidateDraftModel(RequestModel):
@@ -526,6 +542,7 @@ async def _validate_draft_internal(item: ValidateDraftModel, request: Request, s
                     vr.validationSuccess = True
                 else:
                     stream_iter.trace(lambda: f"Agent responded with error message: {earm.error.message if earm.error else ''}", TraceType.error)
+                    vr.error = earm.error
                     vr.runtimeError = earm.error.message if earm.error else None
             else:
                 vr.runtimeError = "Must specify a query to validate a draft."

@@ -227,7 +227,7 @@ class EmailFormat(BaseModel):
 
 class PasswordModel(BaseModel):
     minLength: int = Field(default=8, title="Minimum length", description="The fewest characters a password may have.", ge=4, le=128)
-    maxLength: int = Field(default=16, title="Maximum length", description="The most characters a password may have.", ge=4, le=128)
+    maxLength: int = Field(default=128, title="Maximum length", description="The most characters a password may have.", ge=4, le=128)
     minSpecialChars: int = Field(default=2, title="Minimum special characters", description="How many special characters a password must contain.", ge=0)
     minUpper: int = Field(default=2, title="Minimum uppercase letters", description="How many uppercase letters a password must contain.", ge=0)
     minLower: int = Field(default=2, title="Minimum lowercase letters", description="How many lowercase letters a password must contain.", ge=0)
@@ -250,13 +250,11 @@ class PasswordModel(BaseModel):
 
 
 class BuiltinAuthModel(BaseModel):
-    method: Literal[AuthMethod.builtin] = Field(default=AuthMethod.builtin, title="Sign-in method", description="Identifies which sign-in method this is.")
     password: PasswordModel = Field(default_factory=PasswordModel, title="Password policy", description="What a password must contain.")
     maxInactivityMinutes: int = Field(default=60, title="Sign out after inactivity (minutes)", description="How long a session may sit idle before the user is signed out.", ge=5)
     reauthenticateAfterMinutes: int = Field(default=720, title="Re-authenticate after (minutes)", description="How long a session lasts before the user must sign in again, however active they are.", ge=5)
     emailCodeActiveMinutes: int = Field(default=30, title="Emailed code validity (minutes)", description="How long a code emailed for a new user or a password reset stays usable.", ge=1)
     mustChangePasswordEveryDays: int = Field(default=365, title="Force password change (days)", description="How often users must choose a new password.", ge=1, le=3650)
-    scriptAccessMaxAgeMinutes: int = Field(default=60, title="Script token max age (minutes)", description="How long a token issued to a script stays valid.", ge=1)
     emailDomain: str | None = Field(default=None, title="Allowed email domain", description="Only addresses in this domain may have accounts.")
     newUserEmail: EmailFormat = Field(
         default_factory=lambda: EmailFormat(
@@ -284,13 +282,20 @@ class OidcAuthModel(BaseModel):
     method: Literal[AuthMethod.oidc] = Field(default=AuthMethod.oidc, title="Sign-in method", description="Identifies which sign-in method this is.")
     issuer: str = Field(..., title="Issuer", description="The provider's issuer URL, such as https://login.example.com. Its configuration is read from there, and it is what the 'iss' claim must match.", max_length=500)
     clientId: str = Field(..., title="Client id", description="The client id this account was registered with at the provider.", max_length=200)
-    clientSecretName: ProfileName | None = Field(default=None, title="Client secret name", description="The name of the entry in the secrets configuration holding the client secret. The agent server resolves it, since the agent server is what calls the provider. Leave it empty for a provider registered without a secret.")
+    returnUrl: str = Field(..., title="Return address", description="Where the identity provider sends the browser after signing in: the Search2o UI as it is reached from a browser, such as https://search2o.example.com/ui. Register this same address at the provider as the application's redirect URI - the two must match exactly, or the provider refuses the sign-in. One address for the account.", max_length=500)
+    clientSecret: str = Field(default="", title="Client secret", description="The client secret the provider issued for this registration. Search2o Cloud uses it to exchange a sign-in code for tokens; it is encrypted at rest and never returned. Leave it empty on an update to keep the stored one.", max_length=2000)
     scopes: list[str] = Field(default_factory=lambda: ["openid", "profile", "email"], title="Scopes", description="What to ask the provider for. The email and name are read from the result, so both are needed.", max_length=20)
-    signingKeys: str = Field(default="", title="Signing keys", description="The provider's signing keys as a JWKS document. Leave it empty when the provider can be reached from the internet, and the keys are read from it directly. Set it for a provider inside your network, and update it whenever the provider's keys change.", max_length=20000)
+    requireVerifiedEmail: bool = Field(default=True, title="Require a verified email", description="Whether the provider must say the email address is verified. Leave it on unless your provider never sends that claim.")
     emailClaim: str = Field(default="email", title="Email claim", description="Which claim in the token holds the email address.", max_length=100)
     nameClaim: str = Field(default="name", title="Name claim", description="Which claim in the token holds the person's name.", max_length=100)
     provisioning: SsoProvisioning = Field(default=SsoProvisioning.reject, title="Unknown users", description="What to do when somebody signs in and has no account here.")
     allowedEmailDomains: list[str] = Field(default_factory=list, title="Allowed email domains", description="Only addresses in these domains may sign in. Leave it empty to allow any address the provider vouches for.", max_length=20)
+
+    @model_validator(mode="after")
+    def openid_scope(self) -> Self:
+        if "openid" not in self.scopes:
+            raise ValueError("The scopes must include 'openid'.")
+        return self
 
 
 class Saml2AuthModel(BaseModel):
@@ -307,7 +312,7 @@ class Saml2AuthModel(BaseModel):
 
 
 AuthModelUnion: TypeAlias = Annotated[
-        BuiltinAuthModel | OidcAuthModel | Saml2AuthModel,
+        OidcAuthModel | Saml2AuthModel,
         Field(discriminator="method"),
 ]
 
@@ -316,7 +321,15 @@ class AuthModel(BaseModel):
     type: Literal[SystemConfigPart.auth] = Field(default=SystemConfigPart.auth, title="Config part", description="Identifies which configuration part this is.")
     cookie: CookieModel = Field(default_factory=CookieModel, title="Session cookie", description="Cookie settings for user sessions.")
     integrationTokenMaxAgeDays: int | None = Field(default=365, title="Integration token max age (days)", description="How long a token issued to an integration stays valid. Leave empty for tokens that never expire.", ge=1)
-    auth: AuthModelUnion = Field(default_factory=BuiltinAuthModel, title="Sign-in method", description="How users of this account sign in, and the settings for that method.")
+    builtinAuth: BuiltinAuthModel = Field(default_factory=BuiltinAuthModel, title="Password sign-in", description="The settings for signing in with an email and a password: the password policy, session lengths, and the emails sent to users. Every account starts with this, and keeps these settings even when single sign-on is the way in.")
+    isBuiltinAllowed: bool = Field(default=True, title="Password sign-in allowed", description="Whether users may sign in with a password. Turn it off only once single sign-on is configured and proven, or nobody can sign in. With it on beside single sign-on, both are offered.")
+    sso: AuthModelUnion | None = Field(default=None, title="Single sign-on", description="How users of this account sign in with single sign-on, and the settings for that method. Empty means password sign-in only.")
+
+    @model_validator(mode="after")
+    def some_way_in(self) -> Self:
+        if not self.isBuiltinAllowed and self.sso is None:
+            raise ValueError("Password sign-in cannot be turned off before single sign-on is configured.")
+        return self
 
 
 class SysVariables(StrEnum):
@@ -459,17 +472,18 @@ AgentConfigModelUnion: TypeAlias = Annotated[
 
 class AgentRuntime(BaseModel):
     updated: int | None = Field(default=None, title="Updated at", description="When this runtime configuration was produced, in epoch milliseconds.")
+    accountName: str = Field(default='', title="Account name", description="The name of this account, so a client sees a rename without an agent server restart.")
+    serverIp: str = Field(default='', title="Server IP", description="The address this agent server is reached at, so it refreshes without a restart.")
+    docsweb: str = Field(default="https://docs.search2o.com/docsweb", title="UI docs", description="UI uses certain dynamic fields which are served from the web.")
     updatedSystemConfigs: dict[str, SystemConfigModelUnion] = Field(default_factory=dict, title="System configuration", description="The system configuration parts that changed since the agent server last asked.")
     updatedAgentConfigs: dict[str, list[AgentConfigModelUnion]] = Field(default_factory=dict, title="Agent configuration", description="The agent configuration profiles that changed since the agent server last asked.")
     passwordHelp: str = Field(default='', title="Password help", description="The password rules text, shown wherever a password is chosen.")
-    authMethod: AuthMethod = Field(default=AuthMethod.builtin, title="Sign-in method", description="How users of this account sign in, so a client knows what to offer before anyone types.")
+    authMethod: AuthMethod = Field(default=AuthMethod.builtin, title="Sign-in method", description="The single sign-on method when the account has one, else builtin; so a client knows what to offer before anyone types.")
+    isBuiltinAllowed: bool = Field(default=True, title="Password sign-in allowed", description="Whether a password sign-in is offered as well. False only when single sign-on is the only way in.")
     agentVersions: dict[str, int] = Field(default_factory=dict, title="Agent versions", description="The current version of each agent, so an agent server can drop the ones it has cached.")
 
 
 class InitModel(BaseModel):
-    accountName: str = Field(..., title="Account name", description="The account this agent server belongs to.")
-    serverIp: str = Field(..., title="Server IP", description="The address this agent server is reached at.")
     agentServer: AgentServerModel = Field(..., title="Agent server", description="The settings this agent server starts with.")
-    docsweb: str = Field("https://docs.search2o.com/docsweb", title="UI docs", description="UI uses certain dynamic fields which are served from the web.")
 
 

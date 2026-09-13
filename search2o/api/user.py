@@ -59,7 +59,7 @@ async def _decrypt_titles(request: Request, conversations: list) -> None:
     for c in conversations:
         if c.title:
             try:
-                c.title = await Encryptor.decrypt_query(request, c.title)
+                c.title = await Encryptor.decrypt_str(request, c.title)
             except Exception as e:
                 c.title = "Decryption error"
                 MyLogger.error(f"Could not decrypt the title of conversation {c.convid}: {SensitiveString.safe_text(str(e))}")
@@ -144,7 +144,7 @@ class SetConversationTitleModel(RequestModel):
                   summary="Rename a conversation",
                   description="Sets the title shown for a conversation in the user's list. By default a conversation is titled with its first query.")
 async def setConversationTitle(item: SetConversationTitleModel, request: Request) -> BaseResponseModel:
-    encrypted = await Encryptor.encrypt_query(request, item.title)
+    encrypted = await Encryptor.encrypt_str(request, item.title)
     ret = await RestCall.passthrough(request, {"convid": item.convid, "title": encrypted})
     return BaseResponseModel.model_validate(ret)
 

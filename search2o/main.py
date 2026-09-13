@@ -79,7 +79,7 @@ def _error_in_agent_exception_handler(request: Request, exc: ErrorInAgent):
     return JSONResponse(
         status_code=422,
         content = BaseResponseModel(success=False,
-                                    error=ErrorResponseModel(message=exc.message())).model_dump())
+                                    error=ErrorResponseModel(message=exc.message(), path=exc.path)).model_dump())
 
 async def _generic_exception_handler(request: Request, exc: Exception):
     message = "Unexpected error. We have recorded this and will fix it soon."

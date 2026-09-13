@@ -22,11 +22,30 @@ class Allowlist:
         self.errors = []
         self.ew = ew
         self.llm_adapters = []
-        self.e2e_encrypted = False
 
         mutable: dict[str, _ImportedObject] = self.build_eval_allowlist(self.ew.allowlist)
+        mutable["getattr"] = self.safe_getattr
+        mutable["setattr"] = self.safe_setattr
         self.eval_allowlist: types.MappingProxyType[str, _ImportedObject] = types.MappingProxyType(mutable)
         self.check_llm_adapters()
+
+
+    _forbidden_attrs = frozenset({"format", "format_map"})
+
+    @staticmethod
+    def _check_attr_name(name: Any) -> None:
+        if not isinstance(name, str) or name.startswith("_") or name in Allowlist._forbidden_attrs:
+            raise ValueError("getattr and setattr cannot access dunder, private, or format attributes.")
+
+    @staticmethod
+    def safe_getattr(obj: Any, name: Any, *default: Any) -> Any:
+        Allowlist._check_attr_name(name)
+        return getattr(obj, name, *default)
+
+    @staticmethod
+    def safe_setattr(obj: Any, name: Any, value: Any) -> None:
+        Allowlist._check_attr_name(name)
+        setattr(obj, name, value)
 
 
     def resolve(self, spec: str, builtin_classes: set[str]) -> tuple[str, _ImportedObject] | None:
@@ -60,6 +79,11 @@ class Allowlist:
         except Exception:
             self.errors.append(f"Error importing '{spec}'")
         return None
+
+
+    def resolve_function(self, name: str) -> _ImportedObject | None:
+        ret = self.resolve(name, self.builtin_classes())
+        return ret[1] if ret else None
 
 
     def strip_comment(self, line: str) -> str:

@@ -23,6 +23,9 @@ class JsonValidator:
             "must start with a letter, end with a letter or a number, and contain only letters, numbers and underscores",
         r"^[A-Za-z][A-Za-z0-9]{1,15}$":
             "must start with a letter and contain only letters and numbers",
+        r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$":
+            "may contain only letters, numbers and the characters _, - and ., and must start "
+            "and end with a letter or a number",
         r"^[a-z0-9]+(?:_[a-z0-9]+)*$":
             "may contain only lowercase letters, numbers and underscores, and cannot start or end with an underscore",
         # The same rule where an EMPTY value is also allowed, meaning every tag. A separate

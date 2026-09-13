@@ -62,6 +62,9 @@ ProfileName = Annotated[str, Field(pattern=identifierPattern, max_length=50)]
 
 MemoryLabel = SafeName
 
+serviceAccountNamePattern = r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$"
+ServiceAccountName = Annotated[str, Field(pattern=serviceAccountNamePattern, min_length=1, max_length=64)]
+
 
 _tagBody = r"[a-z0-9]+(?:_[a-z0-9]+)*"
 

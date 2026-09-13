@@ -65,6 +65,7 @@ class ReportWindow(RequestModel):
 
 class ErrorResponseModel(BaseModel):
     message: str = Field(..., title="Error message", description="What went wrong, written to be displayed in the UI.")
+    path: str = Field(default="", exclude_if=lambda value: not value, title="Path", description="Where in the agent the error happened, as a dotted path such as main.commands.trace, so the UI can link to it. Empty when the error has no location.")
     cause: str | None = Field(default=None, exclude_if=lambda value: value is None, title="Cause", description="The name of the underlying error, when the failure was caused by another one.")
     data: dict[str, Any] = Field(default_factory=dict, title="Error data", description="Structured details about the error, when there are any.")
 
@@ -86,6 +87,7 @@ class DraftResponseModel(BaseResponseModel):
     draftCompilationValidated: bool = Field(default=False, description="Whether the draft definition compiles and passed the security checks.", title="Compilation validated")
     draftExecutionValidated: bool = Field(default=False, description="Whether the draft ran successfully against its validation query. Both this and draftCompilationValidated must be true before the draft can be published.", title="Execution validated")
     isNewDraft: bool = Field(default=False, description="Whether this draft is for a new agent rather than an existing one.", title="New draft")
+    usedProfiles: dict[str, list[str]] = Field(default_factory=dict, description="The configuration profiles this draft would use, as profile type to names. It is a hint for writing the agent, and can go out of date as the draft is edited.", title="Used profiles")
 
 
 class ExecAgentResponseModel(BaseResponseModel):

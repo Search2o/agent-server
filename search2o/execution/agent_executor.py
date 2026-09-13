@@ -25,12 +25,11 @@ from search2o.common.mynamespace import AgentNamespace, CommandNamespace
 from search2o.common.requesthelper import RequestHelper
 from search2o.common.rest_call import RestCall
 from search2o.common.typechecker import ExpectedType, TypeChecker
-from search2o.config.config import Config
 from search2o.execution.agent_state import ConversationState, AgentOutput
 from search2o.execution.agentexec import AgentExec
 from search2o.execution.llmresponse import LlmResponse
 from search2o.execution.prompts import Prompts
-from search2o.execution.runtime import RuntimeState
+from search2o.execution.runtime import Runtime, RuntimeState
 from search2o.execution.secretsmanager import SecretsManager
 from search2o.execution.statenodes import FunctionNode, CommandListNode, Node
 from search2o.execution.streamiter import StreamIter
@@ -338,14 +337,14 @@ class AgentExecutor:
                     raise
                 except Exception as e:
                     if sub_path:
-                        message = f"Could not evaluate the Python expression for {path} at {sub_path.removeprefix(".")}: {error_message(e)}"
+                        message = f"Could not evaluate the Python expression at {sub_path.removeprefix(".")}: {error_message(e)}"
                     else:
-                        message = f"Could not evaluate the Python expression at {path}: {error_message(e)}"
+                        message = f"Could not evaluate the Python expression: {error_message(e)}"
                     raise ShowMessage(message, path=path)
                 if TypeChecker.check_type(expected_type, ret):
                     return ret
                 else:
-                    raise ShowMessage(f"{path!r} is expected to evaluate to {expected_type} but it evaluated to {type(ret).__name__}",
+                    raise ShowMessage(f"The expression is expected to evaluate to {expected_type} but it evaluated to {type(ret).__name__}.",
                                       path=path)
             else:
                 return val # String literal
@@ -417,7 +416,7 @@ class AgentExecutor:
         if SysVariables.userSession in included:
             sysvar.userSession = RequestHelper.token_hash(self.request)
         if SysVariables.serverIp in included:
-            sysvar.serverIp = Config.init_model.serverIp
+            sysvar.serverIp = Runtime.server_ip
         if SysVariables.cookies in included:
             sysvar.cookies = self.request.cookies
         return sysvar

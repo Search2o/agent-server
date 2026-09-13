@@ -43,12 +43,6 @@ class LoginResponseModel(BaseResponseModel):
     cookie: dict[str, JsonValue] = Field(default_factory=dict, description="Cookie authentication information")
 
 
-class ScriptLoginResponseModel(BaseResponseModel):
-    token: str | None = Field(default=None, description="Token that identifies the user for script access. This token is valid for 1 hour or as set in the system configuration.")
-    tokenType: str = Field(default="", description="Type of token. Typically its value is 'Bearer'.")
-    expiresIn: int = Field(default=0, description="Time in seconds until the token expires.")
-
-
 class EmailCodeModel(RequestModel):
     email: EmailStr
 
@@ -61,7 +55,7 @@ class CreatePasswordWithEmailCodeModel(RequestModel):
 
 class AccountNameResponseModel(BaseResponseModel):
     accountName: str = Field(default="", description="Name of this account. Displayed in the UI.")
-    authMethod: AuthMethod = Field(default=AuthMethod.builtin, title="Sign-in method", description="How users of this account sign in, so the sign-in screen knows what to offer before anyone types.")
+    authMethods: list[AuthMethod] = Field(default_factory=list, title="Sign-in methods", description="Every way a user may sign in to this account, so the sign-in screen knows what to offer before anyone types. One entry means go straight to it; two mean offer the choice.")
 
 
 class PasswordHelpResponseModel(BaseResponseModel):
@@ -81,15 +75,38 @@ async def login(item: LoginModel, request: Request, response: Response) -> Login
     return lrm
 
 
-@auth_router.post("/scriptLogin", response_model=ScriptLoginResponseModel,
-                  summary="Script login to the system",
-                  description="To use scripts to access this API, one needs a token. This call is used to "
-                              "generate that authorization token. By default, this token is valid for one hour. "
-                              "This can be changed in the system configuration.",
+class SsoStartResponseModel(BaseResponseModel):
+    url: str = Field(default="", title="Sign-in URL", description="Where to send the browser to sign in with the account's identity provider. It carries this sign-in's own one-time values, so it is used once and never stored.")
+
+
+class SsoFinishModel(RequestModel):
+    code: str = Field(..., min_length=1, max_length=4096, title="Code", description="The single-use code the identity provider returned to the UI.")
+    state: str = Field(..., min_length=1, max_length=128, title="State", description="The value that ties this answer to the sign-in that started it, returned unchanged by the identity provider.")
+
+
+@auth_router.post("/ssoStart", response_model=SsoStartResponseModel,
+                  summary="Start a single sign-on",
+                  description="Answers the address to send the browser to, so the user signs in with the account's "
+                              "identity provider. Anyone can call this: the user is not signed in yet.",
                   openapi_extra={"security": []})
-async def scriptLogin(item: LoginModel, request: Request) -> ScriptLoginResponseModel:
-    d = await RestCall.passthrough(request, item.model_dump())
-    return ScriptLoginResponseModel.model_validate(d)
+async def ssoStart(request: Request) -> SsoStartResponseModel:
+    ret = await RestCall.passthrough(request, {})
+    return SsoStartResponseModel.model_validate(ret)
+
+
+@auth_router.post("/ssoFinish", response_model=LoginResponseModel,
+                  summary="Finish a single sign-on",
+                  description="Completes a sign-in with the code and state the identity provider returned to the UI. "
+                              "It sets the same session cookie a password sign-in does. Anyone can call this: the "
+                              "user is not signed in yet.",
+                  openapi_extra={"security": []})
+async def ssoFinish(item: SsoFinishModel, request: Request, response: Response) -> LoginResponseModel:
+    ret = await RestCall.passthrough(request, item.model_dump())
+    lrm = LoginResponseModel.model_validate(ret)
+    cookie = lrm.cookie
+    if lrm.success and cookie:
+        response.set_cookie(**cookie)
+    return lrm
 
 
 @auth_router.post("/emailCode", response_model=BaseResponseModel,
@@ -118,8 +135,12 @@ async def createPasswordWithEmailCode(item: CreatePasswordWithEmailCodeModel, re
                               "also confirms that the server is up. Anyone can call this.",
                   openapi_extra={"security": []})
 async def getAccountName(request: Request) -> AccountNameResponseModel:
-    from search2o.config.config import Config
-    return AccountNameResponseModel(accountName=Config.init_model.accountName, authMethod=Runtime.auth_method, success=True)
+    methods: list[AuthMethod] = []
+    if Runtime.is_builtin_allowed:
+        methods.append(AuthMethod.builtin)
+    if Runtime.auth_method != AuthMethod.builtin:
+        methods.append(Runtime.auth_method)
+    return AccountNameResponseModel(accountName=Runtime.account_name, authMethods=methods, success=True)
 
 
 @auth_router.post("/getPasswordHelp", response_model=PasswordHelpResponseModel,

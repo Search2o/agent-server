@@ -297,4 +297,4 @@ class ConversationRun:
             self.stream_iter.progress(f"{title} failed")
         user_facing = er.user_message if er.user_message and not self.is_validation_run else er.error_message
         return ExecAgentResponseModel(success=False, agentName=self.agent_name, resultCode=er.result_code,
-                                      error=ErrorResponseModel(message=user_facing) if user_facing else None)
+                                      error=ErrorResponseModel(message=user_facing, path=er.path) if user_facing else None)

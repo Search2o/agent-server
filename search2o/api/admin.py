@@ -19,7 +19,7 @@ from search2o.execution.allowlist import Allowlist
 from search2o.execution.encryptor import Encryptor
 from search2o.execution.runtime import Runtime, PROMPT_DECRYPTION_ERROR
 from search2o.models.apimodels import ErrorResponseModel, BaseResponseModel, EmptyRequestModel, PagedRequestModel, RequestModel
-from search2o.models.configtypes import SystemConfigPart, AgentConfigPart
+from search2o.models.configtypes import SystemConfigPart, AgentConfigPart, ServiceAccountName
 from search2o.models.schemaobjects import UserRole, UserRoleFacet
 from search2o.models.systemconfig import SecretSource, AgentSecretsModel, \
     EncryptionModel, EncryptionSource, SystemConfigModelUnion, AgentConfigModelUnion, \
@@ -162,6 +162,82 @@ async def updateRole(item: UpdateRoleModel, request: Request)-> BaseResponseMode
     return BaseResponseModel.model_validate(ret)
 
 
+class ServiceAccountItemModel(BaseModel):
+    userName: str = Field(..., description="Name of the service account. This is what identifies it to an administrator, and it is unique within this account.")
+    email: str = Field(..., description="Address that identifies this service account. Unless one was given when it was created, this is '<name>@service', which deliberately receives no mail.")
+    role: UserRole = Field(..., description="This service account's role, which determines what it can do.")
+
+
+class GetServiceAccountsResponseModel(BaseResponseModel):
+    serviceAccounts: list[ServiceAccountItemModel] = Field(default_factory=list, description="Every service account in this account, ordered by name.")
+
+
+class CreateServiceAccountModel(RequestModel):
+    name: ServiceAccountName = Field(..., description="Name for the service account: letters and digits, with '_', '-' or '.' between them, starting and ending with a letter or a digit.")
+    role: UserRole = Field(..., description="Role the service account acts with. Any role except owner.")
+    email: EmailStr | None = Field(default=None, description="Address for the service account. Leave it out to use '<name>@service', which receives no mail.")
+
+
+class CreateServiceAccountResponseModel(BaseResponseModel):
+    email: str = Field(default="", description="Address that identifies the new service account.")
+    userName: str = Field(default="", description="Name of the new service account.")
+    role: UserRole | None = Field(default=None, description="Role the service account acts with.")
+    token: str = Field(default="", description="The service key, which the program uses to authenticate. It is returned once and is stored nowhere, so keep it. Rotate the key to get another.")
+    tokenType: str = Field(default="", description="Type of the key. Typically its value is 'Bearer'.")
+
+
+class ServiceAccountEmailModel(RequestModel):
+    email: str = Field(..., min_length=1, max_length=320, description="Address of the service account, as returned when it was created. This is not an ordinary email address: by default it is '<name>@service'.")
+
+
+class SetServiceAccountRoleModel(ServiceAccountEmailModel):
+    role: UserRole = Field(..., description="Role the service account acts with. Any role except owner.")
+
+
+class RotateServiceAccountKeyResponseModel(BaseResponseModel):
+    token: str = Field(default="", description="The new service key. It is returned once and is stored nowhere, and the previous key stops working immediately.")
+    tokenType: str = Field(default="", description="Type of the key. Typically its value is 'Bearer'.")
+
+
+@admin_router.post("/getServiceAccounts", response_model=GetServiceAccountsResponseModel,
+                   summary="Get service accounts",
+                   description="Lists the service accounts, ordered by name. A service account is a program rather than a person, so it is listed here rather than with the users.")
+async def getServiceAccounts(item: EmptyRequestModel, request: Request) -> GetServiceAccountsResponseModel:
+    ret = await RestCall.passthrough(request, item.model_dump())
+    return GetServiceAccountsResponseModel.model_validate(ret)
+
+
+@admin_router.post("/createServiceAccount", response_model=CreateServiceAccountResponseModel,
+                   summary="Create a service account",
+                   description="Creates a service account and answers its key. The key is returned once and is stored nowhere, so keep it; if it is lost, rotate the key to get another. A service account may hold any role except owner.")
+async def createServiceAccount(item: CreateServiceAccountModel, request: Request) -> CreateServiceAccountResponseModel:
+    ret = await RestCall.passthrough(request, item.model_dump())
+    return CreateServiceAccountResponseModel.model_validate(ret)
+
+
+@admin_router.post("/rotateServiceAccountKey", response_model=RotateServiceAccountKeyResponseModel,
+                   summary="Rotate a service account's key",
+                   description="Issues a new key for a service account. The previous key stops working immediately. The new key is returned once and is stored nowhere.")
+async def rotateServiceAccountKey(item: ServiceAccountEmailModel, request: Request) -> RotateServiceAccountKeyResponseModel:
+    ret = await RestCall.passthrough(request, item.model_dump())
+    return RotateServiceAccountKeyResponseModel.model_validate(ret)
+
+
+@admin_router.post("/setServiceAccountRole", response_model=BaseResponseModel,
+                   summary="Modify a service account's role",
+                   description="Changes what a service account may do. Any role except owner. A service account's role cannot be changed with updateRole, which is for people.")
+async def setServiceAccountRole(item: SetServiceAccountRoleModel, request: Request) -> BaseResponseModel:
+    ret = await RestCall.passthrough(request, item.model_dump())
+    return BaseResponseModel.model_validate(ret)
+
+
+@admin_router.post("/deleteServiceAccount", response_model=BaseResponseModel,
+                   summary="Delete a service account",
+                   description="Deletes a service account. Its key stops working immediately and the account cannot be recovered. A service account cannot be deleted with deleteUsers, which is for people.")
+async def deleteServiceAccount(item: ServiceAccountEmailModel, request: Request) -> BaseResponseModel:
+    ret = await RestCall.passthrough(request, item.model_dump())
+    return BaseResponseModel.model_validate(ret)
+
 @admin_router.post("/freeze", response_model=BaseResponseModel, summary="Freeze system",
                    description="This call can be made to stop any changes to agents or descriptors in the system. No new agents can be published either. Developers can still create draft agents and run them.")
 async def freeze(item: EmptyRequestModel, request: Request)-> BaseResponseModel:
@@ -233,7 +309,7 @@ async def _decrypt_prompt_profile(profile: PromptProfileModel, request: Request)
         text = getattr(profile, field)
         if text:
             try:
-                setattr(profile, field, await Encryptor.decrypt_query(request, text))
+                setattr(profile, field, await Encryptor.decrypt_str(request, text))
             except Exception as e:
                 MyLogger.error(f"Could not decrypt the {field} prompt of profile {profile.name!r}: {SensitiveString.safe_text(error_message(e))}")
                 setattr(profile, field, PROMPT_DECRYPTION_ERROR)
@@ -243,7 +319,7 @@ async def _encrypt_prompt_profile(profile: PromptProfileModel, request: Request)
     for field in ("system", "user"):
         text = getattr(profile, field)
         if text:
-            setattr(profile, field, await Encryptor.encrypt_query(request, text))
+            setattr(profile, field, await Encryptor.encrypt_str(request, text))
 
 
 class UpdateSystemConfigPartModel(RequestModel):
