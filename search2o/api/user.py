@@ -15,7 +15,7 @@ from search2o.execution.agent_state import AgentOutput, ConversationState
 from search2o.execution.encryptor import Encryptor
 from search2o.execution.runtime import Runtime
 from search2o.models.apimodels import BaseResponseModel, ConvId, EmptyRequestModel, PagedRequestModel, RequestModel
-from search2o.models.schemaobjects import SearchHistoryModel, UiPrefModel, UserRole
+from search2o.models.schemaobjects import AgentExecResult, SearchHistoryModel, UiPrefModel, UserRole
 
 user_router = APIRouter(prefix="/api/user", tags=["user"])
 
@@ -43,6 +43,7 @@ class UnpinnedConversationsResponseModel(BaseResponseModel):
 class ConversationElementModel(BaseModel):
     query: str = Field(..., description="The question the user asked.")
     response: AgentOutput = Field(..., description="The response from the agent")
+    resultCode: str = Field(..., description="How this turn ended: 'success' if the agent finished it, or 'ask' if the agent paused to ask the user for input. Those are the only two ways a turn is kept in a conversation.")
     respondedAt: int = Field(..., description="The time the agent responded in epoch milliseconds.", json_schema_extra={"format": "int64"})
 
 
@@ -105,7 +106,9 @@ async def getConversation(item: ConversationRequestModel, request: Request) -> G
         agent_state = ConversationState.model_validate_json(state)
         conversation = []
         for run in agent_state.runs:
-            conversation.append(ConversationElementModel(query=run.inputs.get("query", ''), response=run.output, respondedAt=run.execAt))
+            result_code = AgentExecResult.ask if run.callstack else AgentExecResult.success
+            conversation.append(ConversationElementModel(query=run.inputs.get("query", ''), response=run.output,
+                                                        resultCode=result_code, respondedAt=run.execAt))
         return GetConversationResponseModel(conversation=conversation, success=True)
     else:
         raise ShowMessage("Could not get this conversation. It probably expired.", "This conversation has expired. Please start a new one.")

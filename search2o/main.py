@@ -123,7 +123,7 @@ def _add_global_security(fast_api: FastAPI):
 def create_app():
     from search2o.common.exceptions import ErrorFromCloudException
     conf = Config.init_model.agentServer
-    fast_api = FastAPI(version="1.0",
+    fast_api = FastAPI(version=Config.client_version,
                        title="Search2o",
                        description="Search2o Agent Server",
                        separate_input_output_schemas=False,
