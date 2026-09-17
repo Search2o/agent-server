@@ -23,7 +23,7 @@ from search2o.models.configtypes import SystemConfigPart, AgentConfigPart, Servi
 from search2o.models.schemaobjects import UserRole, UserRoleFacet
 from search2o.models.systemconfig import SecretSource, AgentSecretsModel, \
     EncryptionModel, EncryptionSource, SystemConfigModelUnion, AgentConfigModelUnion, \
-    ApiConnectionPoolsModel, AgentServerModels, CompileOptions, EvalAllowlistModel, PromptProfileModel
+    ApiConnectionPoolsModel, CompileOptions, EvalAllowlistModel, PromptProfileModel
 
 admin_router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -392,11 +392,7 @@ async def _check_rewrite_targets(model: CompileOptions, request: Request):
 
 @admin_router.post("/updateSystemConfigPart", response_model=UpdateConfigPartResponseModel, summary="Updates part of the configuration", description="Updates part of the configuration. See the documentation for more details.")
 async def updateSystemConfigPart(item: UpdateSystemConfigPartModel, request: Request)-> UpdateConfigPartResponseModel:
-    if item.configValue.type == SystemConfigPart.servers:
-        pool_names = await api_connection_pool_names(request)
-        for server in item.configValue.servers.values():
-            _check_connection_pool(server.cloudPoolName, pool_names)
-    elif item.configValue.type == SystemConfigPart.apiConnectionPools:
+    if item.configValue.type == SystemConfigPart.apiConnectionPools:
         await _check_pools_not_in_use(item.configValue, request)
     elif item.configValue.type == SystemConfigPart.operators:
         for _op, action in item.configValue.operators:
@@ -427,10 +423,6 @@ async def _check_pools_not_in_use(model: BaseModel, request: Request):
         if pool_name in removed:
             users.setdefault(pool_name, []).append(used_by)
 
-    servers = ConfigPartResponseModel.model_validate(
-        await RestCall.call_method(request, "getSystemConfigPart", {"part": SystemConfigPart.servers}))
-    for name, server in cast(AgentServerModels, servers.configValue).servers.items():
-        add_user(server.cloudPoolName, f"agent server {name!r}")
     for part, label in ((AgentConfigPart.llm, "LLM profile"), (AgentConfigPart.api, "API profile")):
         profiles = AgentConfigPartResponseModel.model_validate(
             await RestCall.call_method(request, "getAgentConfigPart", {"part": part}))

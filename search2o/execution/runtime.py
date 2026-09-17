@@ -23,6 +23,7 @@ from search2o.common.sensitivestring import SensitiveString
 from search2o.execution.allowlist import Allowlist
 from search2o.execution.encryptor import Encryptor
 from search2o.execution.network import Network
+from search2o.execution.secretsmanager import SecretsManager
 from search2o.llm.llmcontext import AllLlmContexts
 from search2o.models.configtypes import AuthMethod, SystemConfigPart, AgentConfigPart
 from search2o.models.systemconfig import SearchOptionsModel, AgentValidationModel, ApiServerModel, DbConnectionModel, \
@@ -165,6 +166,9 @@ class RuntimeState:
             cls._compiledExpr[expr] = ce
         return await cls.execute_expr(ce, d)
 
+    def secret(self, name: str) -> str:
+        return SecretsManager(self.secrets_model).secret(name)
+
     @staticmethod
     def _d2m(ar: AgentRuntime, part: SystemConfigPart) -> C | None:
         return ar.updatedSystemConfigs.get(part)
@@ -276,7 +280,6 @@ class Runtime:
         await state.update(request, rt, cls._current)
         cls._current = state
         cls.retire(state.retired)
-        RestCall.set_network(state.network)
         MyLogger.info("Agent runtime updated.")
 
     _agents: ClassVar[dict[str, AgentExec]] = {}

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import urlparse
 
 from pydantic import JsonValue
 
@@ -14,7 +15,9 @@ from search2o.common.exceptions import SERVICE_RETRY, ShowMessage, ErrorInAgent,
 from search2o.common.mtimeout import m_timeout
 from search2o.common.sensitivestring import SensitiveString
 from search2o.common.typechecker import ExpectedType
+from search2o.common.urlquery import split_query
 from search2o.execution.agent_executor import AgentExecutor, CommandExec, CommandInvocation
+from search2o.models.systemconfig import ApiServerModel, PathAdd
 
 
 class ApiCommand(CommandExec):
@@ -23,38 +26,107 @@ class ApiCommand(CommandExec):
         "accept": "application/json",
     }
 
+    @staticmethod
+    def join_url(base: str, url: str) -> str:
+        if not base:
+            return url
+        return f"{base.rstrip('/')}/{url.lstrip('/')}"
+
+    @staticmethod
+    def check_relative_path(profile_name: str, profile: ApiServerModel, url: str) -> None:
+        if profile.addPath == PathAdd.cannot:
+            raise ShowMessage(f"The API profile {profile_name!r} does not allow a path to be added to its URL.")
+        parts = urlparse(url)
+        if parts.scheme or parts.netloc:
+            raise ShowMessage(f"The url of an api command that uses the API profile {profile_name!r} must be a "
+                              f"relative path, not an absolute URL.")
+        if ".." in parts.path.split("/"):
+            raise ShowMessage(f"The url of an api command that uses the API profile {profile_name!r} cannot step "
+                              f"outside the profile's URL with '..'.")
+
+    @staticmethod
+    def merge_headers(profile_name: str, profile: ApiServerModel, profile_headers: dict[str, JsonValue],
+                      agent_headers: dict[str, JsonValue] | None) -> dict[str, JsonValue]:
+        headers = dict(profile_headers)
+        if not agent_headers:
+            return headers
+        by_lower = {name.lower(): name for name in profile_headers}
+        for name, value in agent_headers.items():
+            in_profile = by_lower.get(name.lower())
+            if in_profile is not None:
+                if not profile.headers[in_profile].override:
+                    raise ShowMessage(f"The API profile {profile_name!r} does not allow the header "
+                                      f"{in_profile!r} to be changed.")
+                headers[in_profile] = value
+            elif profile.canAddHeaders:
+                headers[name] = value
+            else:
+                raise ShowMessage(f"The API profile {profile_name!r} does not allow the header {name!r} to be added.")
+        return headers
+
+    @staticmethod
+    def merge_query_params(profile_name: str, profile: ApiServerModel, base_params: dict[str, JsonValue],
+                           profile_params: dict[str, JsonValue],
+                           agent_params: dict[str, JsonValue] | None) -> dict[str, JsonValue]:
+        params = {**base_params, **profile_params}
+        if not agent_params:
+            return params
+        for name, value in agent_params.items():
+            if name in profile.queryParams:
+                if not profile.queryParams[name].override:
+                    raise ShowMessage(f"The API profile {profile_name!r} does not allow the query parameter "
+                                      f"{name!r} to be changed.")
+            elif name in base_params:
+                raise ShowMessage(f"The API profile {profile_name!r} sets the query parameter {name!r} in its URL, "
+                                  f"so it cannot be changed.")
+            elif not profile.canAddQueryParams:
+                raise ShowMessage(f"The API profile {profile_name!r} does not allow the query parameter "
+                                  f"{name!r} to be added.")
+            params[name] = value
+        return params
+
     async def exec_command(self, inv: CommandInvocation, executor: AgentExecutor) -> JsonValue:
         function, command, command_ns, path = inv.frame, inv.command, inv.command_ns, inv.path
+
+        agent_url = executor.param(function, command, command_ns, AgentWords.url, ExpectedType.strt)
+        agent_headers = executor.param(function, command, command_ns, AgentWords.headers, ExpectedType.dictstrt)
+        agent_params = executor.param(function, command, command_ns, AgentWords.queryParams, ExpectedType.dictstrt)
 
         profile_name = executor.param(function, command, command_ns, AgentWords.profile, ExpectedType.strt)
         if profile_name:
             profile = executor.runtime.apis.get(profile_name)
-            if profile:
-                pool_name = profile.connectionPoolName
-                url = await executor.eval_expr(function, f"{path}.profile.{profile_name}.url", profile.url, ExpectedType.strt)
-
-                # headers are merged with what's specified in the agent
-                profile_headers = await executor.eval_expr(function, f"{path}.profile.{profile_name}.headers", profile.headers, ExpectedType.dictstrt)
-                agent_headers = executor.param(function, command, command_ns, AgentWords.headers, ExpectedType.dictstrt)
-                if profile_headers:
-                    headers = profile_headers
-                    if agent_headers:
-                        headers.update({k: v for k, v in agent_headers.items() if k not in profile_headers})
-                elif agent_headers:
-                    headers = agent_headers
-                else:
-                    headers = self.default_headers
-
-            else:
+            if not profile:
                 raise ShowMessage(f"API profile {profile_name} not found")
+            pool_name = profile.connectionPoolName
+            url = await executor.eval_expr(function, f"{path}.profile.{profile_name}.url", profile.url, ExpectedType.strt)
+            url, base_params = split_query(url)
+            agent_url_params: dict[str, JsonValue] = {}
+            if agent_url:
+                self.check_relative_path(profile_name, profile, agent_url)
+                agent_url, agent_url_params = split_query(agent_url)
+                url = self.join_url(url, agent_url)
+            elif profile.addPath == PathAdd.must:
+                raise ShowMessage(f"The API profile {profile_name!r} requires the api command to add a path to its URL.")
+
+            profile_headers = await executor.eval_expr(
+                function, f"{path}.profile.{profile_name}.headers",
+                {name: value.value for name, value in profile.headers.items()}, ExpectedType.dictstrt)
+            headers = self.merge_headers(profile_name, profile, profile_headers, agent_headers)
+
+            profile_params = await executor.eval_expr(
+                function, f"{path}.profile.{profile_name}.queryParams",
+                {name: value.value for name, value in profile.queryParams.items()}, ExpectedType.dictstrt)
+            params = self.merge_query_params(profile_name, profile, base_params, profile_params,
+                                             {**agent_url_params, **(agent_params or {})})
         else:
             pool_name = None
-            url = executor.param(function, command, command_ns, AgentWords.url, ExpectedType.strt)
-            headers: dict[str, JsonValue] = executor.param(function, command, command_ns, AgentWords.headers, ExpectedType.dictstrt)
-            if not headers:
-                headers = self.default_headers
+            url, base_params = split_query(agent_url)
+            headers = agent_headers
+            params = {**base_params, **(agent_params or {})}
 
-        params = executor.param(function, command, command_ns, AgentWords.params, ExpectedType.dictstrt)
+        if not headers:
+            headers = self.default_headers
+
         body = executor.param(function, command, command_ns, AgentWords.body, ExpectedType.dictstrt)
         timeout = executor.param(function, command, command_ns, AgentWords.timeout, ExpectedType.intt)
 
@@ -68,7 +140,7 @@ class ApiCommand(CommandExec):
         executor.stream_iter.trace(lambda: f"Calling API with url = {SensitiveString.safe_url(url)}, "
                                    f"method = {method}, "
                                    f"headers={json.dumps(SensitiveString.safe_dict(headers), indent=2)}, "
-                                   f"params={json.dumps(SensitiveString.safe_dict(params), indent=2)}, "
+                                   f"queryParams={json.dumps(SensitiveString.safe_dict(params), indent=2)}, "
                                    f"body={json.dumps(SensitiveString.safe_dict(body), indent=2)}"
                                    , TraceType.input, inv.path)
         try:

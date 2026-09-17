@@ -86,6 +86,7 @@ class AgentWords(CaseSensitiveStrEnum):
     prompt = auto()
     pydanticClass = auto()
     query = auto()
+    queryParams = auto()
     result = auto()
     shareContext = auto()
     sharePrompts = auto()

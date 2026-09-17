@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import ssl
 from json import JSONDecodeError
 from typing import Any
 from collections.abc import Callable, Awaitable
@@ -14,9 +15,9 @@ import httpx
 from httpx import Response, AsyncClient
 
 from search2o.common.closable import Closable
-from search2o.common.exceptions import ShowMessage
+from search2o.common.exceptions import ShowMessage, error_message
 from search2o.common.sensitivestring import SensitiveString
-from search2o.models.systemconfig import ApiConnectionPoolsModel
+from search2o.models.systemconfig import ApiConnectionPoolModel, ApiConnectionPoolsModel
 
 _RequestFn = Callable[..., Awaitable[Response]]
 
@@ -32,7 +33,6 @@ class Network(Closable):
         pname = name or self.default_pool_name
         pool = self.connection_pools.get(pname)
         if not pool:
-            # Create pool
             pool_model = self._model.pools.get(pname)
             if not pool_model:
                 raise ShowMessage(f"API connection pool '{pname}' not found")
@@ -47,9 +47,40 @@ class Network(Closable):
                                                    max_connections=pool_model.maxConnections,
                                                    max_keepalive_connections=pool_model.maxKeepaliveConnections,
                                                    keepalive_expiry=pool_model.keepaliveExpiry
-                                               ), timeout=timeout)
+                                               ), timeout=timeout,
+                                               verify=self.ssl_context(pname, pool_model))
             self.connection_pools[pname] = pool
         return pool
+
+    @staticmethod
+    def ssl_context(pname: str, pool_model: ApiConnectionPoolModel) -> ssl.SSLContext | bool:
+        if not pool_model.caCertFile and not pool_model.clientCertFile:
+            return True
+        if pool_model.caCertFile:
+            try:
+                context = ssl.create_default_context(cafile=pool_model.caCertFile)
+            except Exception as e:
+                raise ShowMessage(f"The CA certificate file of the API connection pool {pname!r} could not be loaded: "
+                                  f"{error_message(e)}")
+        else:
+            context = httpx.create_ssl_context()
+        if pool_model.clientCertFile:
+            password = None
+            if pool_model.privateKeyPasswordSecret:
+                from search2o.execution.runtime import Runtime
+                try:
+                    password = Runtime.current().secret(pool_model.privateKeyPasswordSecret)
+                except Exception as e:
+                    raise ShowMessage(f"The private key password of the API connection pool {pname!r} could not "
+                                      f"be read: {SensitiveString.safe_text(error_message(e))}")
+            try:
+                context.load_cert_chain(certfile=pool_model.clientCertFile,
+                                        keyfile=pool_model.privateKeyFile or None,
+                                        password=password or None)
+            except Exception as e:
+                raise ShowMessage(f"The client certificate of the API connection pool {pname!r} could not be loaded: "
+                                  f"{error_message(e)}")
+        return context
 
     async def close(self) -> None:
         for client in self.connection_pools.values():

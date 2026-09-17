@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import traceback
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 import httpx
 from fastapi import Request
@@ -17,10 +17,6 @@ from search2o.common.exceptions import ErrorFromCloudException, error_message
 from search2o.common.mylogger import MyLogger
 from search2o.common.requesthelper import RequestHelper
 from search2o.config.config import Config
-from search2o.models.systemconfig import ApiConnectionPoolModel
-
-if TYPE_CHECKING:
-    from search2o.execution.network import Network
 
 
 class CloudErrorResponseModel(BaseModel):
@@ -34,14 +30,13 @@ class RestCall:
     ERROR_TIMEOUT = 5.0
 
     client: AsyncClient | None = None
-    builtin_client: AsyncClient | None = None
 
     @classmethod
     async def init(cls):
-        if cls.builtin_client:
-            await cls.builtin_client.aclose()
-        pool = ApiConnectionPoolModel()
-        cls.builtin_client = httpx.AsyncClient(
+        if cls.client:
+            await cls.client.aclose()
+        pool = Config.init_model.agentServer.cloudPool
+        cls.client = httpx.AsyncClient(
             follow_redirects=True,
             limits=httpx.Limits(max_connections=pool.maxConnections,
                                 max_keepalive_connections=pool.maxKeepaliveConnections,
@@ -51,25 +46,14 @@ class RestCall:
 
     @classmethod
     async def close(cls):
-        cls.client = None
-        if cls.builtin_client:
-            await cls.builtin_client.aclose()
-            cls.builtin_client = None
-
-    @classmethod
-    async def get_builtin_client(cls) -> AsyncClient:
-        if cls.builtin_client is None or cls.builtin_client.is_closed:
-            await cls.init()
-        return cls.builtin_client
-
-    @classmethod
-    def set_network(cls, network: Network) -> None:
-        cls.client = network.get_pool(Config.init_model.agentServer.cloudPoolName)
+        if cls.client:
+            await cls.client.aclose()
+            cls.client = None
 
     @classmethod
     async def get_client(cls) -> AsyncClient:
         if cls.client is None or cls.client.is_closed:
-            return await cls.get_builtin_client()
+            await cls.init()
         return cls.client
 
     @classmethod
@@ -161,7 +145,7 @@ class RestCall:
         params["requestedMethod"] = cls.get_method(request)
         try:
             await cls.call_method(request, "reportError", params,
-                                  client=await cls.get_builtin_client(), timeout=cls.ERROR_TIMEOUT)
+                                  client=await cls.get_client(), timeout=cls.ERROR_TIMEOUT)
         except Exception:
             MyLogger.error(f"Could not report error to the cloud: {message}")
 

@@ -10,8 +10,7 @@ from typing import Literal, Annotated, TypeAlias, Self
 
 from pydantic import BaseModel, Field, JsonValue, PrivateAttr, AfterValidator, model_validator
 
-from .configtypes import SystemConfigPart, AgentConfigPart, AuthMethod, ProfileName, TagFilter
-
+from .configtypes import SystemConfigPart, AgentConfigPart, AuthMethod, ProfileName, TagFilter, ExprString, DynamicDict
 
 ProfileDoc = Annotated[str, Field(default="", title="Documentation", description="Documentation of what this profile is used for. This field is optional. It can be useful in generating agent definitions.", max_length=500)]
 
@@ -25,7 +24,7 @@ class TimeoutModel(BaseModel):
     write: float = Field(default=30.0, title="Write timeout (seconds)", description="How long to wait while sending the request body.")
     pool: float = Field(default=10.0, title="Pool timeout (seconds)", description="How long to wait for a free connection from the pool.")
 
-class ApiConnectionPoolModel(BaseModel):
+class ConnectionPoolModel(BaseModel):
     maxConnections: int = Field(
         default=20,
         title="Max connections",
@@ -43,6 +42,33 @@ class ApiConnectionPoolModel(BaseModel):
     )
     timeout: TimeoutModel = Field(default_factory=TimeoutModel, title="Timeouts", description="The connect, read, write and pool timeouts for calls made through this pool.")
 
+
+class ApiConnectionPoolModel(ConnectionPoolModel):
+    caCertFile: str | None = Field(
+        default=None,
+        title="CA certificate file",
+        description="PEM file containing the certificate authority or chain this pool trusts. It REPLACES the authorities trusted by default rather than adding to them, so it must contain every authority this pool needs to reach its endpoint.",
+    )
+    clientCertFile: str | None = Field(
+        default=None,
+        title="Client certificate file",
+        description="PEM file containing the client certificate and its chain.",
+    )
+    privateKeyFile: str | None = Field(
+        default=None,
+        title="Private key file",
+        description=(
+            "PEM file containing the private key. May be omitted when the "
+            "private key is included in clientCertFile."
+        ),
+    )
+    privateKeyPasswordSecret: str | None = Field(
+        default=None,
+        title="Private key password secret",
+        description="Name of the secret that holds the password for the encrypted private key, if required.",
+    )
+
+
 class ApiConnectionPoolsModel(BaseModel):
     type: Literal[SystemConfigPart.apiConnectionPools] = Field(default=SystemConfigPart.apiConnectionPools, title="Config part", description="Identifies which configuration part this is.")
     pools: dict[ProfileName, ApiConnectionPoolModel] = Field(default_factory=dict, title="Connection pools",
@@ -54,18 +80,38 @@ class ApiConnectionPoolsModel(BaseModel):
             self.pools["default"] = ApiConnectionPoolModel()
         return self
 
+class ValueModel(BaseModel):
+    value: ExprString = Field(..., title="Value")
+    override: bool = Field(default=False, title="Override", description="Whether this header value can be overridden.")
+
+class PathAdd(StrEnum):
+    can = auto()
+    cannot = auto()
+    must = auto()
+
 class ApiServerModel(NamedBaseModel):
     type: Literal[AgentConfigPart.api] = Field(default=AgentConfigPart.api, title="Config part", description="Identifies which configuration part this is.")
-    url: str = Field(
+    url: ExprString = Field(
         ...,
         title="Server URL",
         description="The base URL of this API server.",
     )
-    headers: dict[str, JsonValue] = Field(
+    addPath: PathAdd = Field(default=PathAdd.can, title="Path add", description="Whether command can add path to the base URL")
+
+    headers: dict[str, ValueModel] = Field(
         default_factory=dict,
         title="Server headers",
         description="Headers sent with every call, including any authentication.",
     )
+    canAddHeaders: bool = Field(default=False, title="Can add headers", description="Whether more headers can be added by the command.")
+
+    queryParams: dict[str, ValueModel] =  Field(
+        default_factory=dict,
+        title="Query parameters",
+        description="Query parameters sent with every call",
+    )
+    canAddQueryParams: bool = Field(default=False, title="Can add query parameters", description="Whether more query parameters can be added by the command.")
+
     connectionPoolName: ProfileName = Field(default="default", title="Connection pool", description="The connection pool used for calls to this server.")
 
 
@@ -103,13 +149,13 @@ class DbConnectionPool(BaseModel):
     connectArgs: dict[str, JsonValue] = Field(
         default_factory=dict,
         title="Driver arguments",
-        description="Arguments passed straight through to the database driver.",
+        description="Arguments passed straight through to the database driver. Certificate files belong here.",
     )
 
 
 class DbConnectionModel(NamedBaseModel):
     type: Literal[AgentConfigPart.db] = Field(default=AgentConfigPart.db, title="Config part", description="Identifies which configuration part this is.")
-    connectionString: str | None = Field(default=None, title="Connection string", description="The database connection string. When set here, an agent cannot override it.")
+    connectionString: ExprString | None = Field(default=None, title="Connection string", description="The database connection string. When set here, an agent cannot override it.")
     connectionPool: DbConnectionPool = Field(default_factory=DbConnectionPool, title="Connection pool", description="Pool settings for connections to this database.")
 
 def not_reserved_function(value: str) -> str:
@@ -132,12 +178,12 @@ class McpServerModel(BaseModel):
     type: Literal[AgentConfigPart.mcp] = Field(default=AgentConfigPart.mcp, title="Config part", description="Identifies which configuration part this is.")
     name: SafeMcpName = Field(..., title="Name", description="The name agents use to refer to this MCP server.")
     doc: ProfileDoc = Field(..., title="Notes", description="Free-text notes about this server, for whoever maintains the configuration.")
-    url: str = Field(
+    url: ExprString = Field(
         ...,
         title="Server URL",
         description="The URL of the MCP server.",
     )
-    headers: dict[str, JsonValue] = Field(
+    headers: dict[str, ExprString] = Field(
         default_factory=dict,
         title="Server headers",
         description="Headers sent with every call, including any authentication.",
@@ -158,9 +204,10 @@ class LlmModel(NamedBaseModel):
     type: Literal[AgentConfigPart.llm] = Field(default=AgentConfigPart.llm, title="Config part", description="Identifies which configuration part this is.")
     vendor: str = Field(default="openai", title="Vendor", description="The LLM vendor. Reports are organized under this name.")
     adapter: str = Field(default="openai", title="Adapter", description="The adapter class that connects to this LLM. It must implement the LlmAdapter interface and be on the allowlist.")
-    url: str = Field(default="https://api.openai.com", title="Server URL", description="The URL of the LLM server.")
-    headers: dict[str, str] = Field(default_factory=dict, title="HTTP headers", description="Headers added to the request. Values are dynamic strings, as in agents.")
-    additionalParams: dict[str, JsonValue] = Field(default_factory=dict, title="Additional parameters", description="Additional parameters to send to the LLM. They are merged with the parameters the adapter class produces and win wherever the two disagree. String values are interpreted as dynamic strings, as in agents.")
+    url: ExprString = Field(default="https://api.openai.com", title="Server URL", description="The URL of the LLM server.")
+    headers: dict[str, ExprString] = Field(default_factory=dict, title="HTTP headers", description="Headers added to the request. Values are dynamic strings, as in agents.")
+    queryParams: dict[str, ExprString] = Field(default_factory=dict, title="Query parameters", description="Query parameters. Values are dynamic strings, as in agents.")
+    additionalParams: DynamicDict = Field(default_factory=dict, title="Additional parameters", description="Additional parameters to send to the LLM. They are merged with the parameters the adapter class produces and win wherever the two disagree. String values are interpreted as dynamic strings, as in agents.")
     model: str = Field(..., title="Model", description="The model this profile calls. A profile represents one model of one vendor; to use another model, define another profile.")
     pricing: ModelDetails = Field(default_factory=ModelDetails, title="Pricing", description="The model's prices per million tokens. The cost of a run is calculated from these.")
     maxTokens: int = Field(default=5000, title="Max tokens",
@@ -396,7 +443,7 @@ class AgentServerModel(BaseModel):
     redocUrl: str | None = Field(default="/redoc", title="ReDoc URL", description="Where the ReDoc documentation is served.")
     openapiUrl: str | None = Field(default="/openapi.json", title="OpenAPI URL", description="Where the OpenAPI schema is served.")
     logs: dict[str, JsonValue] = Field(default_factory=dict, title="Logging", description="Logging configuration for the agent server.")
-    cloudPoolName: ProfileName = Field(default="default", title="Cloud connection pool", description="The connection pool used for calls to the Search2o cloud.")
+    cloudPool: ConnectionPoolModel = Field(default_factory=ConnectionPoolModel, title="Cloud connection pool", description="How this agent server connects to the Search2o cloud. It carries connection settings only: it is deliberately not one of the API connection pools, and it has no certificate fields, so nothing configured for an agent can change how this server reaches the Search2o cloud. A server behind a proxy that re-signs TLS trusts that proxy through the SSL_CERT_FILE environment variable, which is where a machine-wide trust setting belongs. Changing any of this needs an agent server restart.")
 
 
 class AgentServerModels(BaseModel):

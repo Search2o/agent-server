@@ -23,6 +23,7 @@ from search2o.common.sensitivestring import SensitiveString
 from search2o.common.toolcallmethods import ToolCallMethods
 from search2o.common.toolresponse import ToolResponse
 from search2o.common.typechecker import ExpectedType
+from search2o.common.urlquery import split_query
 from search2o.execution.agent_executor import AgentExecutor, AskException, CommandExec, FunctionFrame, CommandInvocation
 from search2o.execution.llmresponse import LlmResponse
 from search2o.execution.prompts import PromptHelper
@@ -130,8 +131,11 @@ class LlmCommand(CommandExec):
         llmreq.retries = model_config.retries
         llmreq.maxTokens = model_config.maxTokens
 
-        llmreq.url = await executor.eval_expr(task, f"{path}.profile.{llm_name}.url", model_config.url, ExpectedType.strt)
+        url = await executor.eval_expr(task, f"{path}.profile.{llm_name}.url", model_config.url, ExpectedType.strt)
+        llmreq.url, url_params = split_query(url)
         llmreq.headers = await executor.eval_expr(task, f"{path}.profile.{llm_name}.headers", model_config.headers, ExpectedType.dictstrt)
+        query_params = await executor.eval_expr(task, f"{path}.profile.{llm_name}.queryParams", model_config.queryParams, ExpectedType.dictstrt)
+        llmreq.queryParams = {**url_params, **query_params}
         llmreq.additionalParams = await executor.eval_expr(task, f"{path}.profile.{llm_name}.additionalParams", model_config.additionalParams, ExpectedType.dictstrt)
 
 
@@ -329,7 +333,7 @@ class LlmCommand(CommandExec):
             js = context.adapter.process_request(req)
 
             async with m_timeout(timeout):
-                return await client.post(req.url, headers=req.headers, json=js)
+                return await client.post(req.url, headers=req.headers, params=req.queryParams, json=js)
 
         except TimeoutError:
             raise LlmError(

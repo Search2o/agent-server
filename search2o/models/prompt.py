@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, JsonValue
 
+from search2o.models.configtypes import ExprString
 from search2o.models.schemaobjects import AgentFunctionModel
 
 
@@ -111,7 +112,9 @@ class LlmRequestModel(BaseModel):
     model: str = Field(default="", description="The model this call uses.", title="Model")
 
     url: str = Field(default="", title="Server URL", description="The LLM server URL, after the profile's expressions are evaluated.")
-    headers: dict[str, JsonValue] = Field(default_factory=dict, title="HTTP headers", description="The request headers, after the profile's expressions are evaluated.")
+    headers: dict[str, str] = Field(default_factory=dict, title="HTTP headers", description="The request headers, after the profile's expressions are evaluated.")
+    queryParams: dict[str, str] = Field(default_factory=dict, title="Query parameters", description="Query parameters")
+
     additionalParams: dict[str, JsonValue] = Field(default_factory=dict, title="Additional parameters", description="Extra parameters from the profile, merged over what the adapter produces.")
 
     retries: int = Field(
