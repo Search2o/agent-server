@@ -4,9 +4,12 @@
 # See the LICENSE.md file and https://search2o.com/legal/license.txt.
 
 import asyncio
+import errno
 import inspect
+import logging
 import sys
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from pathlib import Path
 
 import uvicorn
@@ -33,7 +36,27 @@ from search2o.common.rest_call import RestCall
 from search2o.config.buildconfig import BuildConfig
 from search2o.config.config import Config
 from search2o.execution.init import Init
+from search2o.execution.runtime import Runtime
 from search2o.models.apimodels import BaseResponseModel, ErrorResponseModel
+
+
+_DEFAULT_PORT = 9020
+
+
+def _startup_banner(host: str, port: int) -> None:
+    conf = Config.init_model.agentServer
+    base = f"http://{host}:{port}"
+    entries = [("Account", Runtime.account_name), ("Serving", base)]
+    if conf.uiPath:
+        entries.append(("UI", f"{base}/{conf.uiPath.strip('/')}/"))
+    for label, path in (("Swagger", conf.docsUrl), ("ReDoc", conf.redocUrl), ("OpenAPI", conf.openapiUrl)):
+        if path:
+            entries.append((label, f"{base}{path}"))
+    width = max(len(label) for label, _ in entries) + 1
+    lines = [f"Search2o agent server {Config.client_version}"]
+    lines += [f"  {(label + ':'):<{width}} {value}" for label, value in entries if value]
+    lines.append("  Press CTRL+C to stop.")
+    print("\n".join(lines), flush=True)
 
 
 @asynccontextmanager
@@ -184,6 +207,14 @@ def create_app():
     return fast_api
 
 
+def _quiet_log_config() -> dict:
+    config = deepcopy(uvicorn.config.LOGGING_CONFIG)
+    loggers = config.setdefault("loggers", {})
+    loggers.setdefault("uvicorn.error", {})["level"] = "WARNING"
+    loggers["httpx"] = {"level": "WARNING", "propagate": True}
+    return config
+
+
 def _uvicorn_config(args: list[str]) -> uvicorn.Config:
     try:
         context = uvicorn.main.make_context("search2o", args)
@@ -196,11 +227,42 @@ def _uvicorn_config(args: list[str]) -> uvicorn.Config:
     params = dict(context.params)
     params["headers"] = [header.split(":", 1) for header in params.get("headers") or ()]
     if params.get("log_config") is None:
-        params["log_config"] = uvicorn.config.LOGGING_CONFIG
+        params["log_config"] = _quiet_log_config()
     if params.get("app_dir"):
         sys.path.insert(0, params["app_dir"])
     accepted = inspect.signature(uvicorn.Config).parameters
     return uvicorn.Config(**{k: v for k, v in params.items() if k in accepted})
+
+class _PortInUse(logging.Filter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hit = False
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, OSError) and record.msg.errno == errno.EADDRINUSE:
+            self.hit = True
+            return False
+        return True
+
+
+class _Server(uvicorn.Server):
+    async def startup(self, sockets=None) -> None:
+        in_use = _PortInUse()
+        logger = logging.getLogger("uvicorn.error")
+        if not self.config.uds:
+            logger.addFilter(in_use)
+        try:
+            await super().startup(sockets=sockets)
+        except SystemExit:
+            if not in_use.hit:
+                raise
+            port = self.config.port
+            taken = (f"Search2o's default port {port}" if port == _DEFAULT_PORT else f"Port {port}")
+            raise SystemExit(f"{taken} is already in use. "
+                             f"Please start it in an available port: search2o --port XXXX") from None
+        finally:
+            logger.removeFilter(in_use)
+        _startup_banner(self.config.host, self.config.port)
 
 
 def cli():
@@ -228,8 +290,9 @@ def cli():
         return
 
     user_args = sys.argv[1:]
-    port_args = [] if any(a == "--port" or a.startswith("--port=") for a in user_args) else ["--port", "9020"]
-    asyncio.run(uvicorn.Server(_uvicorn_config(["search2o.main:create_app", "--factory", *user_args, *port_args])).serve())
+    port_args = [] if any(a == "--port" or a.startswith("--port=") for a in user_args) else ["--port", str(_DEFAULT_PORT)]
+    config = _uvicorn_config(["search2o.main:create_app", "--factory", *user_args, *port_args])
+    asyncio.run(_Server(config).serve())
 
 
 if __name__ == "__main__":

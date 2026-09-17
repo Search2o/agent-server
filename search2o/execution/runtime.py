@@ -280,7 +280,7 @@ class Runtime:
         await state.update(request, rt, cls._current)
         cls._current = state
         cls.retire(state.retired)
-        MyLogger.info("Agent runtime updated.")
+        MyLogger.log(None, "debug", "Agent runtime updated.")
 
     _agents: ClassVar[dict[str, AgentExec]] = {}
     _agents_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
