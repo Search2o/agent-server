@@ -1,6 +1,6 @@
 # Search2o
 
-Search2o is a platform for creating and running AI agents behind a search interface.
+Search2o is a platform to build, run, and use AI agents — with a search interface
 
 **Website:** [search2o.com](https://search2o.com) · **Source:** [GitHub](https://github.com/Search2o/agent-server)
 
