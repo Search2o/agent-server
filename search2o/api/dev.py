@@ -27,7 +27,7 @@ from search2o.models.configtypes import AgentName, AgentTag
 from search2o.models.apimodels import AgentTitle, BaseResponseModel, ConvId, \
     DraftResponseModel, EmptyRequestModel, PagedRequestModel, ReportWindow, RequestModel, SearchQuery, \
     ValidateDraftResponseModel
-from search2o.models.schemaobjects import AgentExecResult, AgentType, DescriptorModel, NotificationType, \
+from search2o.models.schemaobjects import AgentExecResult, AgentType, DescriptorModel, AuditEntryType, \
     ValidationResult, ValidationResults, ValidationResultType
 
 dev_router = APIRouter(prefix="/api/dev", tags=["dev"])
@@ -374,38 +374,38 @@ async def getIndexStatus(item: GetIndexStatusModel, request: Request) -> GetInde
     return GetIndexStatusResponseModel.model_validate(ret)
 
 
-# ----- notifications and docs -----
+# ----- audit log and docs -----
 
-class NotificationModel(BaseModel):
-    data: dict[str, JsonValue] = Field(..., description="What happened, as structured values rather than a sentence. Keys come from a fixed vocabulary: agent, part, name, action, old, new, fields, added, removed, reason. Only field names are reported for a configuration change, never the values. Render the text to show the user from the notification type and these values.")
-    notificationType: NotificationType | None = Field(default=None, description="What the notification is about.")
-    userEmail: str = Field(default="", description="Email of the user whose action raised the notification. Empty if that user no longer exists.")
-    userName: str = Field(default="", description="Name of the user whose action raised the notification.")
-    createdAt: int = Field(..., description="Time the notification was created, in epoch milliseconds.", json_schema_extra={"format": "int64"})
+class AuditLogModel(BaseModel):
+    data: dict[str, JsonValue] = Field(..., description="What happened, as structured values rather than a sentence. Keys come from a fixed vocabulary: agent, part, name, action, old, new, fields, added, removed, reason. Only field names are reported for a configuration change, never the values. Render the text to show the user from the entry type and these values.")
+    entryType: AuditEntryType | None = Field(default=None, description="What the entry is about.")
+    userEmail: str = Field(default="", description="Email of the user whose action created the entry. Empty if that user no longer exists.")
+    userName: str = Field(default="", description="Name of the user whose action created the entry.")
+    createdAt: int = Field(..., description="Time the entry was created, in epoch milliseconds.", json_schema_extra={"format": "int64"})
 
 
-class GetNotificationsModel(ReportWindow):
+class GetAuditLogModel(ReportWindow):
     nextCursor: str | None = Field(default=None, description="Opaque cursor from a prior response's nextCursor. Omit or null to fetch the first page.")
     limit: int = Field(default=10, ge=1, le=25, description="The maximum number of results to return.")
-    notificationType: NotificationType | None = Field(default=None, description="Only return notifications of this type. Cannot be combined with email.")
-    userEmail: EmailStr | None = Field(default=None, description="Only return notifications raised by this user. Cannot be combined with notificationType.")
+    entryType: AuditEntryType | None = Field(default=None, description="Only return entries of this type. Cannot be combined with email.")
+    userEmail: EmailStr | None = Field(default=None, description="Only return entries created by this user. Cannot be combined with entryType.")
 
     @model_validator(mode="after")
     def _one_filter_only(self) -> Self:
-        if self.userEmail is not None and self.notificationType is not None:
-            raise ShowMessage("Filter by either email or notificationType, not both.")
+        if self.userEmail is not None and self.entryType is not None:
+            raise ShowMessage("Filter by either email or entryType, not both.")
         return self
 
 
-class GetNotificationsResponseModel(BaseResponseModel):
-    notifications: list[NotificationModel] = Field(default_factory=list)
+class GetAuditLogResponseModel(BaseResponseModel):
+    auditLog: list[AuditLogModel] = Field(default_factory=list)
     nextCursor: str | None = None
 
 
-@dev_router.post("/getNotifications", response_model=GetNotificationsResponseModel, summary="Get notifications", description="Gets the workspace notifications, newest first — for example, submissions of agents for indexing or removal and their outcomes. Can be narrowed by time range and notification type.")
-async def getNotifications(item: GetNotificationsModel, request: Request) -> GetNotificationsResponseModel:
+@dev_router.post("/getAuditLog", response_model=GetAuditLogResponseModel, summary="Get the audit log", description="Gets the workspace audit log, newest first — for example, submissions of agents for indexing or removal and their outcomes. Can be narrowed by time range and entry type.")
+async def getAuditLog(item: GetAuditLogModel, request: Request) -> GetAuditLogResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
-    return GetNotificationsResponseModel.model_validate(ret)
+    return GetAuditLogResponseModel.model_validate(ret)
 
 
 class DocsQuestionRequestModel(RequestModel):
@@ -486,7 +486,7 @@ def _environment_problems(results: list[ValidationResult], runtime: RuntimeState
             problems.append(ValidationResult(vtype=r.vtype, path=r.path, detail=f"{r.detail!r} is not in the Allowlist."))
         elif r.vtype == ValidationResultType.secret:
             try:
-                secrets.secret(r.detail)
+                secrets[r.detail]
             except ShowMessage:
                 problems.append(ValidationResult(vtype=r.vtype, path=r.path, detail=f"Secret {r.detail!r} was not found."))
     return problems
@@ -540,7 +540,7 @@ async def _validate_draft_internal(item: ValidateDraftModel, request: Request, s
                     stream_iter.trace(lambda: "Validation successful", TraceType.flow)
                     await RestCall.call_method(request, "setExecutionValidated", {"draftid": item.draftid})
                     vr.validationSuccess = True
-                else:
+                elif earm.resultCode != AgentExecResult.ask.value:
                     stream_iter.trace(lambda: f"Agent responded with error message: {earm.error.message if earm.error else ''}", TraceType.error)
                     vr.error = earm.error
                     vr.runtimeError = earm.error.message if earm.error else None

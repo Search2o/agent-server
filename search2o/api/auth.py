@@ -11,6 +11,7 @@ from search2o.common.exceptions import ShowMessage
 from search2o.common.rest_call import RestCall
 from search2o.execution.runtime import Runtime
 from search2o.models.configtypes import AuthMethod
+from search2o.models.schemaobjects import ServiceLevel
 from search2o.models.systemconfig import CookieModel
 from search2o.models.apimodels import BaseResponseModel, RequestModel
 
@@ -55,6 +56,7 @@ class CreatePasswordWithEmailCodeModel(RequestModel):
 
 class AccountNameResponseModel(BaseResponseModel):
     accountName: str = Field(default="", description="Name of this account. Displayed in the UI.")
+    serviceLevel: ServiceLevel = Field(default=ServiceLevel.free, title="Service level", description="What this account is entitled to, free or paid.")
     authMethods: list[AuthMethod] = Field(default_factory=list, title="Sign-in methods", description="Every way a user may sign in to this account, so the sign-in screen knows what to offer before anyone types. One entry means go straight to it; two mean offer the choice.")
 
 
@@ -140,7 +142,7 @@ async def getAccountName(request: Request) -> AccountNameResponseModel:
         methods.append(AuthMethod.builtin)
     if Runtime.auth_method != AuthMethod.builtin:
         methods.append(Runtime.auth_method)
-    return AccountNameResponseModel(accountName=Runtime.account_name, authMethods=methods, success=True)
+    return AccountNameResponseModel(accountName=Runtime.account_name, serviceLevel=Runtime.service_level, authMethods=methods, success=True)
 
 
 @auth_router.post("/getPasswordHelp", response_model=PasswordHelpResponseModel,
@@ -164,8 +166,8 @@ class GetDocsWebResponseModel(BaseResponseModel):
 
 @auth_router.post("/getDocsWeb", response_model=GetDocsWebResponseModel,
                   summary="Gets a dynamic UI document",
-                  description="Fetches a document the UI needs at runtime, such as the agent schema, the "
-                              "evaluation form or the UI text. The agent server checks for the latest version "
+                  description="Fetches a document the UI needs at runtime, such as the agent schema or the "
+                              "UI text. The agent server checks for the latest version "
                               "and serves it from an in-memory cache. Anyone can call this.",
                   openapi_extra={"security": []})
 async def getDocsWeb(item: GetDocsWebModel) -> GetDocsWebResponseModel:

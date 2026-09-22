@@ -11,6 +11,7 @@ from typing import Literal, Annotated, TypeAlias, Self
 from pydantic import BaseModel, Field, JsonValue, PrivateAttr, AfterValidator, model_validator
 
 from .configtypes import SystemConfigPart, AgentConfigPart, AuthMethod, ProfileName, TagFilter, ExprString, DynamicDict
+from .schemaobjects import ServiceLevel
 
 ProfileDoc = Annotated[str, Field(default="", title="Documentation", description="Documentation of what this profile is used for. This field is optional. It can be useful in generating agent definitions.", max_length=500)]
 
@@ -298,7 +299,7 @@ class PasswordModel(BaseModel):
 
 class BuiltinAuthModel(BaseModel):
     password: PasswordModel = Field(default_factory=PasswordModel, title="Password policy", description="What a password must contain.")
-    maxInactivityMinutes: int = Field(default=60, title="Sign out after inactivity (minutes)", description="How long a session may sit idle before the user is signed out.", ge=5)
+    maxInactivityMinutes: int = Field(default=240, title="Sign out after inactivity (minutes)", description="How long a session may sit idle before the user is signed out.", ge=5)
     reauthenticateAfterMinutes: int = Field(default=720, title="Re-authenticate after (minutes)", description="How long a session lasts before the user must sign in again, however active they are.", ge=5)
     emailCodeActiveMinutes: int = Field(default=30, title="Emailed code validity (minutes)", description="How long a code emailed for a new user or a password reset stays usable.", ge=1)
     mustChangePasswordEveryDays: int = Field(default=365, title="Force password change (days)", description="How often users must choose a new password.", ge=1, le=3650)
@@ -313,7 +314,7 @@ class BuiltinAuthModel(BaseModel):
     )
     forgotPasswordEmail: EmailFormat = Field(
         default_factory=lambda: EmailFormat(
-            subject="Reset your password in Search2o",
+            subject="Create/Reset your password in Search2o",
             bodyHtml="",
         ),
         title="Password reset email",
@@ -434,9 +435,18 @@ class CompileOptions(BaseModel):
     maxComprehensionDepth: int = Field(default=4, title="Max comprehension depth", description="How deeply comprehensions may be nested in an expression.")
     maxGeneratorsInComprehension: int = Field(default=3, title="Max generators per comprehension", description="How many 'for' clauses a single comprehension may have.")
 
+class AgentServerRoute(StrEnum):
+    owner = auto()
+    admin = auto()
+    dev = auto()
+    user = auto()
+    auth = auto()
+    exec = auto()
+    reports = auto()
 
 class AgentServerModel(BaseModel):
     uiPath: str = Field(default="/ui", title="UI path", description="The path the bundled UI is served at. Leave it empty to not serve the UI at all.")
+    routes: list[AgentServerRoute] | None = Field(default=None, title="Route list", description="The list of routes to serve.")
     connectPageUrl: str = Field(default="", title="Connect page URL", description="The page where a user approves an integration's request for access. Leave it empty and it follows the UI path above, which is what keeps the two in step. Set a page under that path for a UI of your own, such as connect, or a full address for a UI hosted elsewhere, such as https://ui.example.com/connect. Whatever is set must point at where the UI is really served. The request is added to it as a query parameter named c.")
     allowCrossOrigin: list[str] = Field(default_factory=lambda: ["*"], title="Allowed CORS origins", description="Other origins allowed to call this API, such as https://ui.example.com.")
     docsUrl: str | None = Field(default="/docs", title="Docs URL", description="Where the API documentation is served.")
@@ -520,6 +530,7 @@ AgentConfigModelUnion: TypeAlias = Annotated[
 class AgentRuntime(BaseModel):
     updated: int | None = Field(default=None, title="Updated at", description="When this runtime configuration was produced, in epoch milliseconds.")
     accountName: str = Field(default='', title="Account name", description="The name of this account, so a client sees a rename without an agent server restart.")
+    serviceLevel: ServiceLevel = Field(default=ServiceLevel.free, title="Service level", description="What this account is entitled to, free or paid.")
     serverIp: str = Field(default='', title="Server IP", description="The address this agent server is reached at, so it refreshes without a restart.")
     docsweb: str = Field(default="https://docs.search2o.com/docsweb", title="UI docs", description="UI uses certain dynamic fields which are served from the web.")
     updatedSystemConfigs: dict[str, SystemConfigModelUnion] = Field(default_factory=dict, title="System configuration", description="The system configuration parts that changed since the agent server last asked.")
@@ -527,6 +538,7 @@ class AgentRuntime(BaseModel):
     passwordHelp: str = Field(default='', title="Password help", description="The password rules text, shown wherever a password is chosen.")
     authMethod: AuthMethod = Field(default=AuthMethod.builtin, title="Sign-in method", description="The single sign-on method when the account has one, else builtin; so a client knows what to offer before anyone types.")
     isBuiltinAllowed: bool = Field(default=True, title="Password sign-in allowed", description="Whether a password sign-in is offered as well. False only when single sign-on is the only way in.")
+    integrationTokenMaxAgeDays: int | None = Field(default=None, title="Integration token max age (days)", description="The longest an integration token may last on this account, so a client can bound what it asks for. Empty means they do not expire.")
     agentVersions: dict[str, int] = Field(default_factory=dict, title="Agent versions", description="The current version of each agent, so an agent server can drop the ones it has cached.")
 
 

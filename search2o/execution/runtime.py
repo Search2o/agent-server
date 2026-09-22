@@ -26,6 +26,7 @@ from search2o.execution.network import Network
 from search2o.execution.secretsmanager import SecretsManager
 from search2o.llm.llmcontext import AllLlmContexts
 from search2o.models.configtypes import AuthMethod, SystemConfigPart, AgentConfigPart
+from search2o.models.schemaobjects import ServiceLevel
 from search2o.models.systemconfig import SearchOptionsModel, AgentValidationModel, ApiServerModel, DbConnectionModel, \
     McpServerModel, PromptProfileModel, AgentRuntime, \
     LlmModel, NamedBaseModel, AgentSecretsModel, EncryptionModel, \
@@ -167,7 +168,7 @@ class RuntimeState:
         return await cls.execute_expr(ce, d)
 
     def secret(self, name: str) -> str:
-        return SecretsManager(self.secrets_model).secret(name)
+        return SecretsManager(self.secrets_model)[name]
 
     @staticmethod
     def _d2m(ar: AgentRuntime, part: SystemConfigPart) -> C | None:
@@ -188,11 +189,13 @@ class RuntimeState:
 class Runtime:
     _current: RuntimeState = RuntimeState()
     account_name: ClassVar[str] = ""
+    service_level: ClassVar[ServiceLevel] = ServiceLevel.free
     server_ip: ClassVar[str] = ""
     docs_web: ClassVar[str] = ""
     password_help: ClassVar[str] = ""
     auth_method: ClassVar[AuthMethod] = AuthMethod.builtin
     is_builtin_allowed: ClassVar[bool] = True
+    integration_token_max_age_days: ClassVar[int | None] = None
     _update_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
     _bg_tasks: ClassVar[set[asyncio.Task]] = set()
     _running: ClassVar[dict[str, int]] = {}
@@ -268,11 +271,13 @@ class Runtime:
         rt0 = (await RestCall.call_method(request, "getRuntime", {"lastUpdatedAt": update_at})).get("runtime")
         rt = AgentRuntime.model_validate(rt0)
         cls.account_name = rt.accountName
+        cls.service_level = rt.serviceLevel
         cls.server_ip = rt.serverIp
         cls.docs_web = rt.docsweb
         cls.password_help = rt.passwordHelp
         cls.auth_method = rt.authMethod
         cls.is_builtin_allowed = rt.isBuiltinAllowed
+        cls.integration_token_max_age_days = rt.integrationTokenMaxAgeDays
         cls._remove_stale_agents(rt.agentVersions)
         if update_at == 0:
             cls.initial_update_check(rt)

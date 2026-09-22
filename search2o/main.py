@@ -31,6 +31,7 @@ from search2o.api.reports import reports_router
 from search2o.api.user import user_router
 from search2o.common.enums import CookieKey
 from search2o.common.exceptions import ErrorFromCloudException, ErrorInAgent, InitializationError
+from search2o.models.systemconfig import AgentServerRoute
 from search2o.common.jsonvalidation import JsonValidator
 from search2o.common.rest_call import RestCall
 from search2o.config.buildconfig import BuildConfig
@@ -143,6 +144,15 @@ def _add_global_security(fast_api: FastAPI):
     fast_api.openapi = custom_openapi
 
 
+_ROUTERS = [(AgentServerRoute.auth, auth_router), (AgentServerRoute.dev, dev_router),
+            (AgentServerRoute.exec, exec_router), (AgentServerRoute.admin, admin_router),
+            (AgentServerRoute.user, user_router), (AgentServerRoute.reports, reports_router),
+            (AgentServerRoute.owner, owner_router)]
+
+if {route for route, _ in _ROUTERS} != set(AgentServerRoute):
+    raise InitializationError("Every AgentServerRoute must name a router in _ROUTERS.")
+
+
 def create_app():
     from search2o.common.exceptions import ErrorFromCloudException
     conf = Config.init_model.agentServer
@@ -190,13 +200,9 @@ def create_app():
     async def health():
         return {"status": "ok"}
 
-    fast_api.include_router(auth_router)
-    fast_api.include_router(dev_router)
-    fast_api.include_router(exec_router)
-    fast_api.include_router(admin_router)
-    fast_api.include_router(user_router)
-    fast_api.include_router(reports_router)
-    fast_api.include_router(owner_router)
+    for route, router in _ROUTERS:
+        if conf.routes is None or route in conf.routes:
+            fast_api.include_router(router)
 
     if conf.uiPath:
         package_dir = Path(__file__).resolve().parent

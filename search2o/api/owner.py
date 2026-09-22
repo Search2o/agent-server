@@ -3,8 +3,6 @@
 # Running or operating this software requires valid, ongoing authorization from Search2o.
 # See the LICENSE.md file and https://search2o.com/legal/license.txt.
 
-from typing import Any
-
 from fastapi import APIRouter, Request
 from pydantic import EmailStr, Field
 
@@ -44,8 +42,8 @@ class AccountModel(BaseResponseModel):
     billingEmail: str | None = Field(default=None, title="Billing email", description="Where invoices and billing notices for this account are sent.")
     accountContactEmail: str | None = Field(default=None, title="Account contact email", description="Who Search2o contacts about this account.")
     billingName: str | None = Field(default=None, title="Billing name", description="The name the payment provider knows this account by. Set when the account is registered and not changed here.")
-    serviceLevel: ServiceLevel = Field(default=ServiceLevel.individual, title="Service level", description="What this account is entitled to. It is set by Search2o and cannot be changed here.")
-    upgradePending: bool = Field(default=False, title="Upgrade pending", description="True from the moment an upgrade is requested until Search2o has dealt with it.")
+    serviceLevel: ServiceLevel = Field(default=ServiceLevel.free, title="Service level", description="What this account is entitled to. It changes to paid through startPaidService and cannot be changed here.")
+    billingStartAt: int | None = Field(default=None, title="Billing start", description="When this account began paying, in epoch milliseconds. Empty until the account moves to a paid plan.", json_schema_extra={"format": "int64"})
     createdAt: int = Field(..., description="Account creation date in epoch milliseconds.", json_schema_extra={"format": "int64"})
 
 @owner_router.post("/getAccount", response_model=AccountModel,
@@ -71,24 +69,17 @@ async def updateAccount(item:UpdateAccountModel, request: Request) -> BaseRespon
     return BaseResponseModel.model_validate(ret)
 
 
-class RequestEvaluationModel(RequestModel):
-    data: dict[str, Any] = Field(..., title="Evaluation form answers", description="The answers collected by the evaluation request form, keyed by question. At most 30 entries.")
+class StartPaidServiceResponseModel(BaseResponseModel):
+    serviceLevel: ServiceLevel | None = Field(default=None, title="Service level", description="The account's service level after the change, which is paid.")
+    billingStartAt: int | None = Field(default=None, title="Billing start", description="When billing for the paid plan starts, in epoch milliseconds.", json_schema_extra={"format": "int64"})
 
 
-@owner_router.post("/requestEvaluation", response_model=BaseResponseModel,
-                  summary="Request an evaluation plan",
-                  description="Asks Search2o for an evaluation plan, sending the answers collected by the request form. Until the request is dealt with, getAccount shows upgradePending as true.")
-async def requestEvaluation(item: RequestEvaluationModel, request: Request) -> BaseResponseModel:
-    ret = await RestCall.passthrough(request, item.model_dump())
-    return BaseResponseModel.model_validate(ret)
-
-
-@owner_router.post("/startPaidService", response_model=BaseResponseModel,
+@owner_router.post("/startPaidService", response_model=StartPaidServiceResponseModel,
                   summary="Start paid service",
-                  description="Moves this account onto a paid plan. It takes no parameters: the plan follows from the account's own service level, shown by getAccount.")
-async def startPaidService(item: EmptyRequestModel, request: Request) -> BaseResponseModel:
+                  description="Moves this account onto a paid plan at once. There is no approval step. It takes no parameters, and returns the new service level and when billing starts.")
+async def startPaidService(item: EmptyRequestModel, request: Request) -> StartPaidServiceResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
-    return BaseResponseModel.model_validate(ret)
+    return StartPaidServiceResponseModel.model_validate(ret)
 
 
 class DeleteAccountModel(RequestModel):

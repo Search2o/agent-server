@@ -16,7 +16,6 @@ from search2o.common.exceptions import ShowMessage
 
 class DocsWebType(StrEnum):
     agentschema = "agentschema"
-    evaluationform = "evaluationform"
     uitext = "uitext"
 
 

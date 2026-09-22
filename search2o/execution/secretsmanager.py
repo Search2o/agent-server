@@ -16,9 +16,9 @@ class SecretsManager:
         self._model = model
 
     def __getitem__(self, name: str) -> str:
-        return self.secret(name=name)
+        return self._secret(name)
 
-    def secret(self, name: str) -> str:
+    def _secret(self, name: str) -> str:
         if not name:
             raise ShowMessage("sys.secret called without a valid name")
         if name in self._model.cache:

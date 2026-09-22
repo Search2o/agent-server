@@ -10,6 +10,7 @@ import contextvars
 from abc import ABC
 from dataclasses import dataclass
 from types import SimpleNamespace
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from typing import cast
 
@@ -423,13 +424,31 @@ class AgentExecutor:
 
     def create_dict(self) -> dict[str, JsonValue]:
         d = {}
-        d[ReadOnlyVariable.sys.value] = self.sysvar
+        sysvar = SimpleNamespace(**vars(self.sysvar))
+        sysvar.exists = self.exists_function(d)
+        d[ReadOnlyVariable.sys.value] = sysvar
         d[ReadOnlyVariable.agent.value] = self.agent_vars
         d[ReadOnlyVariable.conv.value] = self.conversation_state.conversationVars
         d['__builtins__'] = self.runtime.allowlist.eval_allowlist
         d[ReadOnlyVariable.command.value] = CommandNamespace()
-        d[ReadOnlyVariable.env.value] = d # For lookups
         return d
+
+    @classmethod
+    def exists_function(cls, d: dict[str, Any]) -> Callable[[str, str], bool]:
+        def exists(scope: str, name: str) -> bool:
+            if not isinstance(name, str):
+                raise ShowMessage("The name given to sys.exists must be a string.")
+            match scope:
+                case VarNamespace.local:
+                    return name in cls.get_locals_only(d)
+                case VarNamespace.agent:
+                    return name in vars(d[ReadOnlyVariable.agent.value])
+                case VarNamespace.conv:
+                    return name in vars(d[ReadOnlyVariable.conv.value])
+                case "allowlist":
+                    return name in d["__builtins__"]
+            raise ShowMessage("The scope given to sys.exists must be one of local, agent, conv or allowlist.")
+        return exists
 
     @staticmethod
     def get_locals_only(d: dict[str, JsonValue]) -> dict[str, JsonValue]:

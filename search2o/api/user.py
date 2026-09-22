@@ -4,7 +4,7 @@
 # See the LICENSE.md file and https://search2o.com/legal/license.txt.
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 from search2o.common.exceptions import ShowMessage
 from search2o.common.mylogger import MyLogger
@@ -21,7 +21,7 @@ user_router = APIRouter(prefix="/api/user", tags=["user"])
 
 
 class UserProfileModel(BaseModel):
-    email: EmailStr = Field(..., description="Email of the user.")
+    email: str = Field(..., description="Email of the user. A service account's default is '<name>@service', which is not a routable address.")
     userName: str = Field(..., description="Full name of this user or what the user prefers others to see them as")
     uiPref: UiPrefModel = Field(default_factory=UiPrefModel, description="UI preferences associated with this user")
     role: UserRole = Field(..., description="This user's role, which determines the actions that the user can execute in the system.")
@@ -29,6 +29,7 @@ class UserProfileModel(BaseModel):
 
 class UserProfileResponseModel(BaseResponseModel):
     user: UserProfileModel = Field(..., description="The user who has access to this system.")
+    integrationTokenMaxAgeDays: int | None = Field(default=None, title="Integration token max age (days)", description="The longest an integration token may last on this account, which is what createIntegrationToken allows at most. Empty means tokens on this account do not expire.")
 
 
 class PinnedConversationsResponseModel(BaseResponseModel):
@@ -91,7 +92,9 @@ async def updateUserProfile(item: UpdateUserProfileModel, request: Request) -> B
 @user_router.post("/getUserProfile", response_model=UserProfileResponseModel, summary="Get the user profile", description="Gets the user profile. This is used to get the user's name and email address.")
 async def getUserProfile(request: Request) -> UserProfileResponseModel:
     ret = await RestCall.passthrough(request, {})
-    return UserProfileResponseModel.model_validate(ret)
+    profile = UserProfileResponseModel.model_validate(ret)
+    profile.integrationTokenMaxAgeDays = Runtime.integration_token_max_age_days
+    return profile
 
 
 @user_router.post("/getConversation", response_model=GetConversationResponseModel,
@@ -109,7 +112,7 @@ async def getConversation(item: ConversationRequestModel, request: Request) -> G
             result_code = AgentExecResult.ask if run.callstack else AgentExecResult.success
             conversation.append(ConversationElementModel(query=run.inputs.get("query", ''), response=run.output,
                                                         resultCode=result_code, respondedAt=run.execAt))
-        return GetConversationResponseModel(conversation=conversation, success=True)
+        return GetConversationResponseModel(convid=item.convid, conversation=conversation, success=True)
     else:
         raise ShowMessage("Could not get this conversation. It probably expired.", "This conversation has expired. Please start a new one.")
 
@@ -187,6 +190,7 @@ class IntegrationTokenModel(BaseModel):
 
 class CreateIntegrationTokenModel(RequestModel):
     name: str = Field(..., min_length=1, max_length=80, title="Name", description="What to call this token in the list, so it can be told apart from other integrations later.")
+    expiresInDays: int | None = Field(default=None, ge=1, title="Expires in days", description="How many days this token should last. Leave it out to get the longest this account allows. The account's limit is a maximum, so asking for more than it allows is refused rather than shortened.")
 
 
 class CreateIntegrationTokenResponseModel(BaseResponseModel):

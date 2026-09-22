@@ -22,7 +22,7 @@ class IfCommand(CommandExec):
             replay_index += 1
             executor.stream_iter.trace(lambda: f"If condition was already evaluated to {cond}", TraceType.flow, inv.path)
         else:
-            cond = executor.param(function, command, command_ns, AgentWords.condition)
+            cond = bool(executor.param(function, command, command_ns, AgentWords.condition))
             executor.stream_iter.trace(lambda: f"If condition evaluated to {cond}", TraceType.flow, inv.path)
         try:
             if cond:

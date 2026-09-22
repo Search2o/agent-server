@@ -57,7 +57,6 @@ class ReadOnlyVariable(StrEnum):
     command = auto()
     result = auto()
     exc = auto()
-    env = auto()
     sys = auto()
     agent = auto()
     conv = auto()
@@ -78,9 +77,8 @@ class UiPrefModel(BaseModel):
     lang: str = Field(default="en", title="Language", description="The language of the UI. Only English is supported today.")
 
 class ServiceLevel(StrEnum):
-    individual = "individual"
-    evaluation = "evaluation"
-    team = "team"
+    free = "free"
+    paid = "paid"
 
 
 class UserRole(StrEnum):
@@ -222,12 +220,13 @@ class ConnectStatus(StrEnum):
     expired = "expired"
 
 
-class NotificationType(StrEnum):
+class AuditEntryType(StrEnum):
     agentIndexed = "agentIndexed"
     indexingSubmitted = "indexingSubmitted"
     indexingFailed = "indexingFailed"
     descriptorDeleted = "descriptorDeleted"
     tagUpdated = "tagUpdated"
+    failedSignIns = "failedSignIns"
     titleUpdated = "titleUpdated"
     unknownPasswordReset = "unknownPasswordReset"
     servers = auto()

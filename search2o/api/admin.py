@@ -328,6 +328,8 @@ class UpdateSystemConfigPartModel(RequestModel):
 
 class UpdateConfigPartResponseModel(BaseResponseModel):
     configVersion: int
+    errors: dict[str, str] = Field(default_factory=dict, title="Errors",
+                                   description="What is wrong with the configuration that was sent, when the request was unsuccessful. Each key is the line exactly as it was sent, and its value says what is wrong with that line.")
 
 async def api_connection_pool_names(request: Request) -> list[str]:
     ret = ConfigPartResponseModel.model_validate(
@@ -402,7 +404,8 @@ async def updateSystemConfigPart(item: UpdateSystemConfigPartModel, request: Req
     elif item.configValue.type == SystemConfigPart.allowlist:
         al = Allowlist(item.configValue)
         if al.errors:
-            return UpdateConfigPartResponseModel(success=False, error=ErrorResponseModel(message=f"Allowlist has errors: {'\n'.join(al.errors)}"), configVersion=0)
+            return UpdateConfigPartResponseModel(success=False, configVersion=0, errors=al.errors,
+                                                 error=ErrorResponseModel(message="The Allowlist has errors."))
     elif item.configValue.type == SystemConfigPart.secrets:
         await _validate_secrets_update(item.configValue, request)
     elif item.configValue.type == SystemConfigPart.encryption:

@@ -16,39 +16,37 @@ from search2o.models.systemconfig import EvalAllowlistModel
 
 _ImportedObject = Union[Callable[..., Any], type, ModuleType, Any]
 
+class GrantedNames:
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    def _grant(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+
+    def __getattr__(self, name: str) -> Any:
+        path = object.__getattribute__(self, "_path")
+        raise AttributeError(f"'{path}.{name}' is not in the Allowlist.")
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        path = object.__getattribute__(self, "_path")
+        raise TypeError(f"'{path}' is not in the Allowlist: only what is listed under it can be used.")
+
+    def __repr__(self) -> str:
+        granted = sorted(n for n in vars(self) if not n.startswith("_"))
+        return f"<{self._path}: {', '.join(granted)}>"
+
 class Allowlist:
 
     def __init__(self, ew: EvalAllowlistModel):
-        self.errors = []
+        self.errors: dict[str, str] = {}
         self.ew = ew
         self.llm_adapters = []
 
         mutable: dict[str, _ImportedObject] = self.build_eval_allowlist(self.ew.allowlist)
-        mutable["getattr"] = self.safe_getattr
-        mutable["setattr"] = self.safe_setattr
         self.eval_allowlist: types.MappingProxyType[str, _ImportedObject] = types.MappingProxyType(mutable)
         self.check_llm_adapters()
 
-
-    _forbidden_attrs = frozenset({"format", "format_map"})
-
-    @staticmethod
-    def _check_attr_name(name: Any) -> None:
-        if not isinstance(name, str) or name.startswith("_") or name in Allowlist._forbidden_attrs:
-            raise ValueError("getattr and setattr cannot access dunder, private, or format attributes.")
-
-    @staticmethod
-    def safe_getattr(obj: Any, name: Any, *default: Any) -> Any:
-        Allowlist._check_attr_name(name)
-        return getattr(obj, name, *default)
-
-    @staticmethod
-    def safe_setattr(obj: Any, name: Any, value: Any) -> None:
-        Allowlist._check_attr_name(name)
-        setattr(obj, name, value)
-
-
-    def resolve(self, spec: str, builtin_classes: set[str]) -> tuple[str, _ImportedObject] | None:
+    def resolve(self, spec: str, builtin_classes: set[str], line: str = "") -> tuple[str, _ImportedObject] | None:
         try:
             if ' as ' in spec:
                 path, alias = spec.split(' as ')
@@ -71,13 +69,16 @@ class Allowlist:
                 symbol_name = parts[-1]
                 module = importlib.import_module(module_path)
                 if symbol_name != "*":
-                    symbol = getattr(module, symbol_name)
+                    try:
+                        symbol = getattr(module, symbol_name)
+                    except AttributeError:
+                        symbol = importlib.import_module(path)
                     found = True
 
             if found:
                 return alias.strip(), symbol
         except Exception:
-            self.errors.append(f"Error importing '{spec}'")
+            self.errors[line or spec] = "Could not be imported."
         return None
 
 
@@ -92,16 +93,88 @@ class Allowlist:
 
 
     def build_eval_allowlist(self, functions: list[str]) -> dict:
-        env = {}
+        env: dict[str, _ImportedObject] = {}
         bc = self.builtin_classes()
         for spec in functions:
-            line = self.strip_comment(spec)
-            if line.strip():
-                ret = self.resolve(line, bc)
+            line = self.strip_comment(spec).strip()
+            if not line:
+                continue
+            path, _, alias = (part.strip() for part in line.partition(" as "))
+            parts = path.split(".")
+            if parts[-1] == "*":
+                if alias:
+                    self.errors[spec] = "A star import cannot be renamed with 'as'."
+                else:
+                    self.star_import(env, path, parts[:-1], spec)
+            elif len(parts) == 1 and not hasattr(builtins, parts[0]):
+                module = self.import_module(path, spec)
+                if module is not None:
+                    env[alias or path] = self.granted_module(alias or path, module)
+            elif alias or len(parts) == 1:
+                ret = self.resolve(line, bc, spec)
                 if ret:
-                    alias, symbol = ret
-                    env[alias] = symbol
+                    env[ret[0]] = self.contain(ret[0], ret[1])
+            else:
+                ret = self.resolve(path, bc, spec)
+                if ret:
+                    self.graft(env, parts, ret[1])
         return env
+
+    def contain(self, label: str, obj: _ImportedObject) -> _ImportedObject:
+        return self.granted_module(label, obj) if isinstance(obj, ModuleType) else obj
+
+    def granted_module(self, label: str, module: ModuleType) -> GrantedNames:
+        holder = GrantedNames(label)
+        for name in dir(module):
+            if name.startswith("_"):
+                continue
+            try:
+                value = getattr(module, name)
+            except Exception:
+                continue
+            if isinstance(value, ModuleType):
+                continue
+            holder._grant(name, value)
+        return holder
+
+    def import_module(self, path: str, line: str = "") -> ModuleType | None:
+        try:
+            return importlib.import_module(path)
+        except Exception:
+            self.errors[line or path] = "Could not be imported."
+            return None
+
+    def star_import(self, env: dict, path: str, parts: list[str], line: str = "") -> None:
+        module = self.import_module(".".join(parts), line) if parts else None
+        if module is None:
+            if parts:
+                return
+            self.errors[line or path] = "Could not be imported."
+            return
+        names = getattr(module, "__all__", None) or [n for n in dir(module) if not n.startswith("_")]
+        for name in names:
+            try:
+                value = getattr(module, name)
+            except Exception:
+                continue
+            if not isinstance(value, ModuleType):
+                env[name] = value
+
+    def graft(self, env: dict, parts: list[str], symbol: _ImportedObject) -> None:
+        root = parts[0]
+        holder = env.get(root)
+        if not isinstance(holder, GrantedNames):
+            if isinstance(holder, (ModuleType, type)):
+                return
+            holder = GrantedNames(root)
+            env[root] = holder
+        for step in parts[1:-1]:
+            nxt = getattr(holder, step, None)
+            if not isinstance(nxt, GrantedNames):
+                nxt = GrantedNames(f"{holder._path}.{step}")
+                holder._grant(step, nxt)
+            holder = nxt
+        holder._grant(parts[-1], self.contain(".".join(parts), symbol))
 
     def builtin_classes(self) -> set[str]:
         names: list[str] = []
@@ -121,10 +194,10 @@ class Allowlist:
         return set(names)
 
     def check_llm_adapters(self):
-        for cl in self.eval_allowlist.values():
+        for name, cl in self.eval_allowlist.items():
             if inspect.isclass(cl) and issubclass(cl, LlmAdapter):
                 try:
                     obj = cl() # Assumes a no-arg constructor
                     self.llm_adapters.append(obj)
                 except Exception as e:
-                    self.errors.append(f"Class {cl.__name__} is a subclass of LlmAdapter, but produces errors while instantiating with a default constructor: {e}")
+                    self.errors[name] = f"This is a subclass of LlmAdapter, but produces errors while instantiating with a default constructor: {e}"
