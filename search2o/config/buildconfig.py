@@ -6,6 +6,7 @@
 import logging
 import logging.config
 import os
+import re
 import socket
 import uuid
 from http import HTTPStatus
@@ -20,6 +21,8 @@ from importlib.metadata import PackageNotFoundError, version
 
 _LICENSE_ENV = "SEARCH2O_LICENSE_KEY"
 _LICENSE_FILE_ENV = "SEARCH2O_LICENSE_KEY_FILE"
+_LICENSE_WORD = r"[\x21-\x2E\x30-\x7E]+"
+_LICENSE_PATTERN = re.compile(rf"^{_LICENSE_WORD}(/{_LICENSE_WORD})?$")
 
 _LICENSE_HELP_TEXT = """ \
     License key
@@ -81,8 +84,44 @@ class BuildConfig:
         if not key:
             raise InitializationError(cls.no_license_message())
 
+        cls.check_license(key, f"the {_LICENSE_FILE_ENV} file" if path_str else _LICENSE_ENV)
         lic, _, suffix = key.partition("/")
         return lic, suffix
+
+    @classmethod
+    def check_license(cls, key: str, source: str) -> None:
+        if _LICENSE_PATTERN.match(key):
+            return
+        if not key:
+            problem = "it is empty"
+        elif any(c.isspace() for c in key):
+            problem = "it has spaces or line breaks in it"
+        else:
+            wrong = sorted({c for c in key if not (" " < c <= "~") and c != "/"})
+            if wrong:
+                problem = ("it has characters that a license key never has: "
+                           + ", ".join(repr(c) for c in wrong))
+            elif key.count("/") > 1:
+                problem = "it has more than one '/' in it"
+            elif key.startswith("/"):
+                problem = "it has nothing before the '/'"
+            else:
+                problem = "it has nothing after the '/'"
+        raise InitializationError(
+            f"The license key in {source} is not in the right format, because {problem}. "
+            f"A license key is one word, on its own or followed by '/' and a configuration name. "
+            f"Copy it again from https://search2o.com.")
+
+    @classmethod
+    def cloud_refusal(cls, response: httpx.Response) -> InitializationError:
+        try:
+            message = response.json().get("errorMessage")
+        except Exception:
+            message = None
+        if not message:
+            message = ("Invalid license key" if response.status_code == HTTPStatus.FORBIDDEN.value
+                       else "Unexpected licensing error from Search2o. Please report.")
+        return InitializationError(message)
 
     @classmethod
     async def get_cloud_url(cls) -> str:
@@ -102,11 +141,7 @@ class BuildConfig:
                     if not url:
                         raise InitializationError("Search2o did not say where this account's API is. Please report.")
                     return url.rstrip("/")
-                elif response.status_code == HTTPStatus.FORBIDDEN.value:
-                    ret = response.json()
-                    raise InitializationError(ret.get("errorMessage", "Invalid license key"))
-                else:
-                    raise InitializationError("Unexpected licensing error from Search2o. Please report.")
+                raise cls.cloud_refusal(response)
         except InitializationError:
             raise
         except Exception as e:
@@ -131,11 +166,7 @@ class BuildConfig:
                 if response.status_code == 200:
                     ret = response.json()
                     return InitModel.model_validate(ret.get("init"))
-                elif response.status_code == HTTPStatus.FORBIDDEN.value:
-                    ret = response.json()
-                    raise InitializationError(ret.get("errorMessage", "Invalid license key"))
-                else:
-                    raise InitializationError("Unexpected licensing error from Search2o. Please report.")
+                raise cls.cloud_refusal(response)
         except InitializationError:
             raise
         except Exception as e:

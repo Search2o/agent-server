@@ -292,8 +292,7 @@ def cli():
     try:
         asyncio.run(BuildConfig.fetch_and_build())
     except InitializationError as e:
-        print(e)
-        return
+        raise SystemExit(str(e)) from None
 
     user_args = sys.argv[1:]
     port_args = [] if any(a == "--port" or a.startswith("--port=") for a in user_args) else ["--port", str(_DEFAULT_PORT)]

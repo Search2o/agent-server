@@ -4,7 +4,7 @@
 # See the LICENSE.md file and https://search2o.com/legal/license.txt.
 
 import asyncio
-from typing import Annotated, Literal, Self
+from typing import Annotated, Self
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, EmailStr, Field, JsonValue, model_validator
@@ -121,10 +121,6 @@ class GetDescriptorResponseModel(BaseResponseModel):
     agentVersion: int = Field(default=0, description="Version of the agent definition in epoch milliseconds.")
     agentTitle: str = Field(..., description="Title of the agent.")
     isLocked: bool = Field(default=False, description="Specifies whether the descriptor is locked, which means that it is being indexed at this time.")
-
-
-class JobSubmittedResponseModel(BaseResponseModel):
-    jobid: str = Field(default="", description="Identifier of the background job created for this request. Poll getIndexStatus with it to track progress.")
 
 
 # ----- drafts -----
@@ -340,12 +336,12 @@ class PublishDescriptorModel(RequestModel):
     descriptorVersion: int = 0
 
 
-class PublishDescriptorResponseModel(JobSubmittedResponseModel):
-    validationError: str = Field(default="", description="Set when the descriptor was rejected by validation (for example, the description is too vague). No job is created in that case.")
+class PublishDescriptorResponseModel(BaseResponseModel):
+    validationError: str = Field(default="", description="Set when the description was rejected because there is not enough in it to index. Nothing is indexed in that case.")
 
 
 @dev_router.post("/publishDescriptor", response_model=PublishDescriptorResponseModel, summary="Publish an agent descriptor",
-                 description="Publish an agent descriptor. This submits a background job that indexes the agent descriptor in the search engine; poll getIndexStatus with the returned jobid to track it. Indexing can take several minutes.")
+                 description="Publish an agent descriptor and index it for search. The call returns when indexing is done, usually in about 15 seconds. Do not retry a slow call: a retry starts a second indexing of the same agent.")
 async def publishDescriptor(item: PublishDescriptorModel, request: Request) -> PublishDescriptorResponseModel:
     encrypted = await Encryptor.encrypt_str(request, item.descriptor.model_dump_json())
     ret = await RestCall.passthrough(request, {**item.model_dump(), "encrypted": encrypted})
@@ -356,22 +352,6 @@ async def publishDescriptor(item: PublishDescriptorModel, request: Request) -> P
 async def deleteDescriptor(item: AgentNameModel, request: Request) -> BaseResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
     return BaseResponseModel.model_validate(ret)
-
-
-class GetIndexStatusModel(RequestModel):
-    jobid: str
-
-
-class GetIndexStatusResponseModel(BaseResponseModel):
-    jobid: str = ""
-    status: Literal["submitted", "completed", "failed"] | None = Field(default=None, description="Current status of the job. Null when the job was not found (success is false).")
-    message: str = Field(default="", description="Details on the job outcome, such as the error message when the job failed.")
-
-
-@dev_router.post("/getIndexStatus", response_model=GetIndexStatusResponseModel, summary="Get the status of a previously submitted background job", description="publishDescriptor runs as a background job and returns a jobid. This call reports that job's status: submitted, completed or failed.")
-async def getIndexStatus(item: GetIndexStatusModel, request: Request) -> GetIndexStatusResponseModel:
-    ret = await RestCall.passthrough(request, item.model_dump())
-    return GetIndexStatusResponseModel.model_validate(ret)
 
 
 # ----- audit log and docs -----

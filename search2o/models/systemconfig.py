@@ -156,7 +156,7 @@ class DbConnectionPool(BaseModel):
 
 class DbConnectionModel(NamedBaseModel):
     type: Literal[AgentConfigPart.db] = Field(default=AgentConfigPart.db, title="Config part", description="Identifies which configuration part this is.")
-    connectionString: ExprString | None = Field(default=None, title="Connection string", description="The database connection string. When set here, an agent cannot override it.")
+    connectionString: ExprString | None = Field(default=None, title="Connection string", description="The database connection string. It must specify an async driver installed in your Python environment: sqlite+aiosqlite, mysql+aiomysql, postgresql+asyncpg or oracle+oracledb.")
     connectionPool: DbConnectionPool = Field(default_factory=DbConnectionPool, title="Connection pool", description="Pool settings for connections to this database.")
 
 def not_reserved_function(value: str) -> str:

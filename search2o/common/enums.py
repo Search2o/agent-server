@@ -80,6 +80,7 @@ class AgentWords(CaseSensitiveStrEnum):
     outputFormat = auto()
     parallelToolCall = auto()
     params = auto()
+    path = auto()
     postToolCall = auto()
     preToolCall = auto()
     profile = auto()

@@ -19,19 +19,14 @@ class DbCommand(CommandExec):
     async def exec_command(self, inv: CommandInvocation, executor: AgentExecutor) -> JsonValue:
         function, command, command_ns, path = inv.frame, inv.command, inv.command_ns, inv.path
         profile_name = executor.param(function, command, command_ns, AgentWords.profile, ExpectedType.strt)
-        connection_pool = None
-        if profile_name:
-            profile_config = executor.runtime.db_service.get(profile_name)
-            if not profile_config:
-                raise ShowMessage(f"Unknown database profile {profile_name}")
-            connection_pool = profile_config.connectionPool
-            connection_string = await executor.eval_expr(function, f"{path}.profile.{profile_name}.connectionString", profile_config.connectionString, ExpectedType.strt)
-            if not connection_string:
-                raise ShowMessage(f"Database profile {profile_name} does not specify a connection string")
-        else:
-            connection_string = executor.param(function, command, command_ns, AgentWords.connectionString, ExpectedType.strt)
-            if not connection_string:
-                raise ShowMessage(f"Must either specify a connection string or a {AgentWords.profile}")
+
+        profile_config = executor.runtime.db_service.get(profile_name)
+        if not profile_config:
+            raise ShowMessage(f"Unknown database profile {profile_name}")
+        connection_pool = profile_config.connectionPool
+        connection_string = await executor.eval_expr(function, f"{path}.profile.{profile_name}.connectionString", profile_config.connectionString, ExpectedType.strt)
+        if not connection_string:
+            raise ShowMessage(f"Database profile {profile_name} does not specify a connection string")
 
         sql = executor.param(function, command, command_ns, AgentWords.sql, ExpectedType.strt)
         params = executor.param(function, command, command_ns, AgentWords.params, ExpectedType.dictstrt)
