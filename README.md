@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://search2o.com">
-    <img src="https://search2o.com/og.png" alt="Search2o: a platform to build, run, and use AI agents, with a search interface" width="600">
+    <img src="https://search2o.com/images/og.png" alt="Search2o: a platform to build, run, and use AI agents, with a search interface" width="600">
   </a>
 </p>
 

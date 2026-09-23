@@ -24,7 +24,7 @@ from search2o.execution.runtime import Runtime, RuntimeState
 from search2o.execution.secretsmanager import SecretsManager
 from search2o.execution.streamiter import StreamIter, StreamDraftReturn
 from search2o.models.configtypes import AgentName, AgentTag
-from search2o.models.apimodels import AgentTitle, BaseResponseModel, ConvId, \
+from search2o.models.apimodels import AgentTitle, BaseResponseModel, \
     DraftResponseModel, EmptyRequestModel, PagedRequestModel, ReportWindow, RequestModel, SearchQuery, \
     ValidateDraftResponseModel
 from search2o.models.schemaobjects import AgentExecResult, AgentType, DescriptorModel, AuditEntryType, \
@@ -446,7 +446,6 @@ class ValidateDraftModel(RequestModel):
     draftid: str
     inputs: dict[str, JsonValue] = Field(default_factory=dict)
     stream: bool = False
-    convid: ConvId | None = None
     followup: bool = False
 
 
@@ -482,7 +481,7 @@ async def _validate_draft_internal(item: ValidateDraftModel, request: Request, s
         if vr.validationErrors:
             runtime = Runtime.current()
         else:
-            runtime = await Runtime.start_agent_exec(request, validate_response.configUpdatedAt, item.convid)
+            runtime = await Runtime.start_agent_exec(request, validate_response.configUpdatedAt, validate_response.convid)
         vr.validationErrors += _environment_problems(results, runtime)
         if not vr.validationErrors:
             stream_iter.trace(lambda: "No compile errors and security concerns. Running the agent against the validation query", TraceType.flow)
