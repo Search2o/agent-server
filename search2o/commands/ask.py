@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from pydantic import JsonValue, ValidationError
 
@@ -11,6 +11,7 @@ from search2o.common.jsonvalidation import JsonValidator
 from search2o.common.typechecker import ExpectedType
 from search2o.execution.agent_executor import AgentExecutor, CommandExec, AskException, CommandInvocation
 from search2o.execution.statenodes import AskCommandNode
+from search2o.models.apimodels import ASK_KEY
 from search2o.models.schemaobjects import AskInputModel, AskInputsModel, CommandName
 
 
@@ -31,17 +32,19 @@ class AskCommand(CommandExec):
 
         inputs = AskInputsModel(inputs=new_list, message=message)
         if node:
-            answers = executor.ask_answers if executor.ask_answers else {}
+            scope = executor.ask_answers
+            answers = scope.get(ASK_KEY) if isinstance(scope, dict) else None
+            answers = answers if isinstance(answers, dict) else {}
             missing = [ai.name for ai in new_list if not ai.hidden and ai.name not in answers]
             if missing:
                 executor.stream_iter.trace(lambda: f"The user did not answer {missing}, so the agent is asking again",
                                            TraceType.input, inv.path)
-                raise AskException(node=AskCommandNode(), ask_input=inputs)
+                raise AskException(node=AskCommandNode(), ask_input={ASK_KEY: inputs})
             given = {ai.name: answers[ai.name] for ai in new_list if ai.name in answers}
             executor.stream_iter.trace(lambda: f"The user answered: {given}", TraceType.output, inv.path)
             return given
 
         executor.stream_iter.trace(lambda: f"Asking the user for {[ai.name for ai in new_list]} "
                                            f"with the message {message!r}", TraceType.input, inv.path)
-        raise AskException(node=AskCommandNode(), ask_input=inputs)
+        raise AskException(node=AskCommandNode(), ask_input={ASK_KEY: inputs})
 

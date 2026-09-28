@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from fastapi import Request
 from httpx import AsyncClient, Response
 from pydantic import JsonValue
 
+from search2o.execution.hooks import Hooks
 from search2o.common.enums import AgentWords, TraceType
 from search2o.common.epoch import Epoch
 from search2o.common.exceptions import AGENT_PROBLEM, ShowMessage, LlmError, error_message
@@ -51,6 +52,7 @@ class LlmCommand(CommandExec):
                 model = executor.runtime.mcp_servers.get(mcp_name)
                 if not model:
                     raise ShowMessage(f"Unknown MCP server {mcp_name}")
+                await executor.secrets.prefetch(model.secretsUsed)
                 headers = await executor.eval_expr(task, f"{path}.mcp.{mcp_name}.headers", model.headers, ExpectedType.dictstrt)
                 mcp = await Mcp.create(model, headers, executor.stream_iter)
                 executor.mcps[mcp_name] = mcp
@@ -131,6 +133,7 @@ class LlmCommand(CommandExec):
         llmreq.retries = model_config.retries
         llmreq.maxTokens = model_config.maxTokens
 
+        await executor.secrets.prefetch(model_config.secretsUsed)
         url = await executor.eval_expr(task, f"{path}.profile.{llm_name}.url", model_config.url, ExpectedType.strt)
         llmreq.url, url_params = split_query(url)
         llmreq.headers = await executor.eval_expr(task, f"{path}.profile.{llm_name}.headers", model_config.headers, ExpectedType.dictstrt)
@@ -190,11 +193,17 @@ class LlmCommand(CommandExec):
                         tool_replay_index = replay_index
                     else:
                         executor.stream_iter.trace(lambda: f"Calling LLM, request = {json.dumps(SensitiveString.safe_dict(llmreq.model_dump()), indent=2)}", TraceType.input, inv.path)
+                        def hook_args(**more: Any) -> dict[str, Any]:
+                            return {"convid": executor.convid, "agentName": executor.agent_name,
+                                    "userEmail": executor.user_email, "profile": llm_name,
+                                    "isValidation": executor.run.is_validation_run, **more}
+                        await Hooks.guard("beforeLlmCall", lambda: hook_args(request=llmreq.model_dump(mode="json")))
                         llm_start_time = Epoch.ms()
                         llmres = await self.call_llm(executor.request, llmreq, context,
                                                        executor.runtime.network.get_pool(context.llm.connectionPoolName),
                                                        executor.agent_name, executor.agent_version,
                                                        executor.convid, timeout)
+                        await Hooks.guard("afterLlmCall", lambda: hook_args(response=llmres.model_dump(mode="json")))
                         executor.add_llm_result(llm_name, llmreq.model, llmres, llm_start_time)
                         executor.stream_iter.trace(lambda: f"LLM call completed. LLM tokens: "
                                                    f"input text tokens = {llmres.inputTextTokens}, "

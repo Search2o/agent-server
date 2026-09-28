@@ -1,15 +1,14 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
 import asyncio
-import json
 import types
 from typing import Any, ClassVar, TypeVar
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 
 from fastapi import Request
 from pydantic import BaseModel
@@ -22,15 +21,16 @@ from search2o.execution.agentexec import AgentExec
 from search2o.common.sensitivestring import SensitiveString
 from search2o.execution.allowlist import Allowlist
 from search2o.execution.encryptor import Encryptor
+from search2o.execution.hooks import Hooks
 from search2o.execution.network import Network
-from search2o.execution.secretsmanager import SecretsManager
+from search2o.execution.secretsmanager import SecretCache
 from search2o.llm.llmcontext import AllLlmContexts
 from search2o.models.configtypes import AuthMethod, SystemConfigPart, AgentConfigPart
 from search2o.models.schemaobjects import ServiceLevel
 from search2o.models.systemconfig import SearchOptionsModel, AgentValidationModel, ApiServerModel, DbConnectionModel, \
     McpServerModel, PromptProfileModel, AgentRuntime, \
     LlmModel, NamedBaseModel, AgentSecretsModel, EncryptionModel, \
-    SecretSource, AgentConfigModelUnion, ApiConnectionPoolsModel, SysVar
+    AgentConfigModelUnion, ApiConnectionPoolsModel, SysVar
 
 C = TypeVar("C", bound=BaseModel)
 T = TypeVar("T", bound=NamedBaseModel)
@@ -49,8 +49,8 @@ class RuntimeState:
         self.search_options: SearchOptionsModel
         self.validation: AgentValidationModel
         self.secrets_model: AgentSecretsModel
+        self.secret_cache: SecretCache = {}
         self.encryption_model: EncryptionModel
-        self.key_function: Callable | None = None
         self.allowlist: Allowlist
         self.sysvar: SysVar
 
@@ -75,16 +75,8 @@ class RuntimeState:
         self.prompts = self._l2d(ar, AgentConfigPart.prompt) if AgentConfigPart.prompt in ar.updatedAgentConfigs else prev.prompts
         self.mcp_servers = self._l2d(ar, AgentConfigPart.mcp) if AgentConfigPart.mcp in ar.updatedAgentConfigs else prev.mcp_servers
 
-        # Build the allowlist BEFORE decrypting hosted secrets: client-encrypted
         new_allowlist_model = self._d2m(ar, SystemConfigPart.allowlist)
         self.allowlist = Allowlist(new_allowlist_model) if new_allowlist_model is not None else prev.allowlist
-
-        if self.encryption_model.keyFunction:
-            self.key_function = self.allowlist.resolve_function(self.encryption_model.keyFunction)
-            if self.key_function is None:
-                raise InitializationError(f"Encryption key function '{self.encryption_model.keyFunction}' could not be loaded.")
-        else:
-            self.key_function = None
 
         if AgentConfigPart.prompt in ar.updatedAgentConfigs:
             for profile in self.prompts.values():
@@ -99,10 +91,9 @@ class RuntimeState:
 
         if SystemConfigPart.secrets in ar.updatedSystemConfigs:
             self.secrets_model = self._d2m(ar, SystemConfigPart.secrets)
-            if self.secrets_model.secretSource == SecretSource.hosted and self.secrets_model.secretsEncrypted:
-                self.secrets_model.cache = json.loads(await Encryptor.decrypt(request, self,self.secrets_model.secretsEncrypted))
         else:
             self.secrets_model = prev.secrets_model
+            self.secret_cache = prev.secret_cache
 
         if SystemConfigPart.apiConnectionPools in ar.updatedSystemConfigs:
             api_connection_pools: ApiConnectionPoolsModel = self._d2m(ar, SystemConfigPart.apiConnectionPools)
@@ -126,8 +117,8 @@ class RuntimeState:
 
         new_llm_options = self._l2d(ar, AgentConfigPart.llm)
         self.llm_options = new_llm_options if new_llm_options is not None else prev.llm_options
-        if new_llm_options is not None or new_allowlist_model is not None:
-            self.llm_connections = AllLlmContexts(self.llm_options, self.allowlist.llm_adapters)
+        if new_llm_options is not None:
+            self.llm_connections = AllLlmContexts(self.llm_options, Hooks.llm_adapters)
         else:
             self.llm_connections = prev.llm_connections
 
@@ -166,9 +157,6 @@ class RuntimeState:
             ce = compile(expr, "<string>", "exec")
             cls._compiledExpr[expr] = ce
         return await cls.execute_expr(ce, d)
-
-    def secret(self, name: str) -> str:
-        return SecretsManager(self.secrets_model)[name]
 
     @staticmethod
     def _d2m(ar: AgentRuntime, part: SystemConfigPart) -> C | None:
@@ -298,7 +286,7 @@ class Runtime:
             if not agent:
                 obj = await RestCall.call_method(request, "getAgentForExecution", {"agentName": name})
                 agent = AgentExec(obj.get("agentName"), obj.get("agentTitle"),
-                                  obj.get("agentVersion"), obj.get("agentDefinition"))
+                                  obj.get("agentVersion"), obj.get("agentDefinition"), obj.get("secretsUsed"))
                 cls._agents[name] = agent
             return agent
 

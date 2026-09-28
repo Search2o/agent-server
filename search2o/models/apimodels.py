@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
@@ -90,12 +90,16 @@ class DraftResponseModel(BaseResponseModel):
     usedProfiles: dict[str, list[str]] = Field(default_factory=dict, description="The configuration profiles this draft would use, as profile type to names. It is a hint for writing the agent, and can go out of date as the draft is edited.", title="Used profiles")
 
 
+AskBlocks = dict[str, dict[str, Any] | AskInputsModel]
+ASK_KEY = "ask_"
+
+
 class ExecAgentResponseModel(BaseResponseModel):
     convid: str | None = Field(default=None, description="Identifier of this conversation. Send it back to continue with the same agent.", title="Conversation id")
     agentName: str | None = Field(default=None, description="The name of the agent that was executed.", title="Agent name")
     output: AgentOutput | None = Field(default=None, description="The agent's output. Set only when the agent was called without streaming.", title="Output")
     resultCode: str = Field(default="", description="How the agent run ended.", title="Result code")
-    askInput: AskInputsModel | None = Field(default=None, description="Set when the agent paused to ask the user for input. Send the answers as the inputs of the next call on this conversation.", title="Requested input")
+    askInput: AskBlocks | None = Field(default=None, description="Set when the agent paused to ask the user for input, as blocks keyed by the parallel branch that asked, or by 'ask_' for an agent that asked outside a parallel command. A block has a message and a list of inputs; a branch that itself ran a parallel command has blocks nested under its key. Send the answers as the inputs of the next call on this conversation, under the same keys, as one dictionary of input name to answer per block.", title="Requested input")
 
 class ValidateDraftResponseModel(ExecAgentResponseModel):
     draftid: str = Field(..., description="The draft that was validated.", title="Draft id")

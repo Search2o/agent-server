@@ -1,18 +1,19 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
-from search2o.common.exceptions import ShowMessage
+from search2o.common.exceptions import ShowMessage, error_message
 from search2o.common.mylogger import MyLogger
 from search2o.common.rest_call import RestCall
 from search2o.common.sensitivestring import SensitiveString
 from search2o.execution.conversationrun import ConversationRun
 from search2o.execution.agent_state import AgentOutput, ConversationState
 from search2o.execution.encryptor import Encryptor
+from search2o.execution.hooks import Hooks
 from search2o.execution.runtime import Runtime
 from search2o.models.apimodels import BaseResponseModel, ConvId, EmptyRequestModel, PagedRequestModel, RequestModel
 from search2o.models.schemaobjects import AgentExecResult, SearchHistoryModel, UiPrefModel, UserRole
@@ -102,10 +103,15 @@ async def getUserProfile(request: Request) -> UserProfileResponseModel:
                   description="Gets the state of a previous conversation. This is called when the user clicks on past search results.",
                   )
 async def getConversation(item: ConversationRequestModel, request: Request) -> GetConversationResponseModel:
-    state = await RestCall.get_state(request, item.convid)
+    stored = await RestCall.get_state(request, item.convid)
+    if stored.in_hook:
+        try:
+            state = await ConversationRun.restore_state(item.convid, stored.user_email)
+        except Exception as e:
+            raise ShowMessage(error_message(e))
+    else:
+        state = await Encryptor.decrypt(request, Runtime.current(), stored.text) if stored.text else None
     if state:
-        runtime = Runtime.current()
-        state = await Encryptor.decrypt(request, runtime, state)
         agent_state = ConversationState.model_validate_json(state)
         conversation = []
         for run in agent_state.runs:
@@ -177,6 +183,11 @@ class DeleteConversationModel(RequestModel):
                   description="Deletes one of the user's own conversations, along with everything the agent saved in it. This cannot be undone.")
 async def deleteConversation(item: DeleteConversationModel, request: Request) -> BaseResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
+    if ret.get("stateInHook"):
+        try:
+            await Hooks.call("deleteConversation", lambda: {"convid": item.convid, "isValidation": False})
+        except Exception as e:
+            raise ShowMessage(f"The conversation was deleted, but the deleteConversation hook failed: {error_message(e)}")
     return BaseResponseModel.model_validate(ret)
 
 

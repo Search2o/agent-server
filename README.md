@@ -1,10 +1,10 @@
 <p align="center">
   <a href="https://search2o.com">
-    <img src="https://search2o.com/images/og.png" alt="Search2o: a platform to build, run, and use AI agents, with a search interface" width="600">
+    <img src="https://search2o.com/images/og2.png" alt="Search2o: a platform to build, run, and use AI agents, with a search interface" width="600">
   </a>
 </p>
 
-**Website:** [search2o.com](https://search2o.com) · **Source:** [GitHub](https://github.com/Search2o/agent-server) · **Docs:** [search2o.com/docs](https://search2o.com/docs/index.html)
+**Website:** [search2o.com](https://search2o.com) · **Source:** [GitHub](https://github.com/Search2o/agent-server) · **Docs:** [search2o.com/docs](https://search2o.com/docs/index.html) . **Skill** [Search2o-skill](https://github.com/Search2o/search2o-skill)
 
 This repository contains the **Search2o Agent Server**: a stateless, asynchronous Python server that runs agents inside your organization, with a REST API and a bundled GUI. Search2o is in open beta.
 

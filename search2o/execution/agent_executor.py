@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from search2o.common.enums import AgentWords, TraceType
 from search2o.common.exceptions import ErrorInAgent, ErrorFromCloudException, InvokedAgentFailed, ShowMessage, error_message
 from search2o.common.exprhelper import ExprHelper
 from search2o.common.flowcontrol import AgentStopped, BreakException, ContinueException, ReturnFunctionException, \
-    AgentDone, FailCommandException, FlowControlException
+    AgentDone, FailCommandException, FlowControlException, HookRefused
 from search2o.common.mynamespace import AgentNamespace, CommandNamespace
 from search2o.common.requesthelper import RequestHelper
 from search2o.common.rest_call import RestCall
@@ -37,8 +37,8 @@ from search2o.execution.streamiter import StreamIter
 from search2o.mcpclient.mcp import Mcp
 from search2o.models.agentexecmodel import FunctionExecModel, CommandExecModel, SetVariable, CommandList
 from search2o.models.prompt import LlmResponseModel
-from search2o.models.schemaobjects import CommandName, VarNamespace, ReadOnlyVariable, \
-    AgentExecResult, AskInputsModel
+from search2o.models.schemaobjects import CommandName, RESULT_PRODUCING_COMMANDS, VarNamespace, ReadOnlyVariable, \
+    AgentExecResult
 from search2o.models.systemconfig import SysVariables
 
 if TYPE_CHECKING:
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 class ExecResponse:
     result_code: AgentExecResult
     output: AgentOutput | None = None
-    ask_input: AskInputsModel | None = None
+    ask_input: dict[str, Any] | None = None
     agent_return: Any = None
     error_message: str = ""
     user_message: str = ""
@@ -57,7 +57,7 @@ class ExecResponse:
     platform_error: ErrorFromCloudException | None = None
 
 class AskException(FlowControlException):
-    def __init__(self, node: Node, ask_input: AskInputsModel):
+    def __init__(self, node: Node, ask_input: dict[str, Any]):
         self.ask_input = ask_input
         self.nodes = []
         self.append(node)
@@ -82,14 +82,15 @@ class CommandExec(ABC):
                 flat.append(e)
 
         collect(eg)
-        stopped = next((e for e in flat if isinstance(e, AgentStopped)), None)
-        asked = next((e for e in flat if isinstance(e, AskException)), None)
-        if stopped or asked:
-            chosen = stopped or asked
+        refused = next((e for e in flat if isinstance(e, HookRefused)), None)
+        if refused:
+            return refused
+        chosen = next((e for e in flat if isinstance(e, (AgentStopped, AskException))), None)
+        if chosen:
             for other in flat:
                 if other is not chosen:
                     executor.stream_iter.trace(lambda other=other: f"Another command running in parallel also failed: {error_message(other)}", TraceType.error)
-            return stopped or ShowMessage(f"The {CommandName.ask} command cannot be used in commands that run in parallel.")
+            return chosen
         if len(flat) == 1:
             return flat[0]
         return ShowMessage(f"Commands running in parallel failed: "
@@ -127,6 +128,8 @@ class FunctionFrame:
 
 
 _calling_path: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar("calling_path", default=frozenset())
+_replay_state: contextvars.ContextVar[list[Node]] = contextvars.ContextVar("replay_state", default=[])
+_answers_scope: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("answers_scope", default=None)
 
 
 class Name2Command:
@@ -137,11 +140,6 @@ class Name2Command:
         return cls.command_executors.get(name)
 
 class AgentExecutor:
-    _RESULT_PRODUCING_COMMANDS = {
-        CommandName.api, CommandName.db, CommandName.llm, CommandName.search, CommandName.invoke, CommandName.func,
-        CommandName.ask, CommandName.memory, CommandName.parallel
-    }
-
     def __init__(self, run: "ConversationRun",
                  agent_exec: AgentExec,
                  inputs: dict[str, Any],
@@ -161,13 +159,14 @@ class AgentExecutor:
         self.current_stack: FunctionNode | None = None
 
         self.inputs = inputs
-        self.prev_state = [] if self.agent_call_chain else run.prev_state
         self.query = self.get_query(self.inputs)
         self.args: dict[str, JsonValue] = {}
 
         self.callstack: list[Node] = []
         self.mcps: dict[str, Mcp] = {}
         self.mcp_lock = asyncio.Lock()
+        self.secrets_used = agent_exec.secrets_used
+        self.secrets = SecretsManager(self.runtime.secrets_model, self.runtime.secret_cache)
         self.sysvar = self.create_ro()
 
     @property
@@ -204,7 +203,16 @@ class AgentExecutor:
 
     @property
     def ask_answers(self) -> dict[str, Any] | None:
-        return self.run.ask_answers
+        return _answers_scope.get()
+
+    @staticmethod
+    def replay_state() -> list[Node]:
+        return _replay_state.get()
+
+    @staticmethod
+    def set_branch_scope(state: list[Node], answers: dict[str, Any] | None) -> None:
+        _replay_state.set(state)
+        _answers_scope.set(answers)
 
     def remember(self, label: str, text: str) -> None:
         self.run.remember(self.agent_name, label, text)
@@ -374,7 +382,7 @@ class AgentExecutor:
             command_exec = Name2Command.get_command(command.name)
             inv = await self.prepare(function, command, path, replay_index)
             result = await command_exec.exec_command(inv, self)
-            if command.name in self._RESULT_PRODUCING_COMMANDS:
+            if command.name in RESULT_PRODUCING_COMMANDS:
                 self.set_readonly_variable(function, ReadOnlyVariable.result, result)
             return True
         except FlowControlException:
@@ -408,7 +416,7 @@ class AgentExecutor:
         # Always added
         sysvar.inputs = self.inputs
         sysvar.query = self.query
-        sysvar.secret = SecretsManager(self.runtime.secrets_model)
+        sysvar.secret = self.secrets
 
         # Optional
         included = self.runtime.sysvar.sysVariables
@@ -504,9 +512,10 @@ class AgentExecutor:
             expected_type: type[T],
     ) -> T | None:
         if replay_index >= 0:
-            if len(self.prev_state) <= replay_index:
+            prev_state = _replay_state.get()
+            if len(prev_state) <= replay_index:
                 raise ShowMessage("Missing information in accepting user's responses.")
-            node = self.prev_state[replay_index]
+            node = prev_state[replay_index]
             if not isinstance(node, expected_type):
                 raise ShowMessage("Unexpected type error in accepting user's responses.")
             return cast(T, node)
@@ -545,7 +554,7 @@ class AgentExecutor:
                 ae.append(FunctionNode(name=function_name, args=arg_values if arg_values else {},
                                        localVars=self.get_locals_only(frame.locals)))
                 raise
-            except (ErrorFromCloudException, AgentDone, FailCommandException, AgentStopped):
+            except (ErrorFromCloudException, AgentDone, FailCommandException, AgentStopped, HookRefused):
                 raise
             except Exception as e:
                 if function.onError:
@@ -569,10 +578,15 @@ class AgentExecutor:
     async def exec_agent(self, caller_state: list[Node] | None = None) -> ExecResponse:
         self.stream_iter.trace(lambda: f"Starting executing agent {self.agent_name!r}", TraceType.flow)
         agent_path_token = _calling_path.set(frozenset())
+        if caller_state is not None:
+            state = caller_state
+        else:
+            state = [] if self.agent_call_chain else self.run.prev_state
+        replay_token = _replay_state.set(state)
+        answers_token = _answers_scope.set(_answers_scope.get() if self.agent_call_chain else self.run.ask_answers)
         try:
-            if caller_state:
-                self.prev_state = caller_state
-            ret = await self.exec_function(AgentWords.main, None, 0 if self.prev_state else -1)
+            await self.secrets.prefetch(self.secrets_used)
+            ret = await self.exec_function(AgentWords.main, None, 0 if state else -1)
             return ExecResponse(result_code=AgentExecResult.success, output=self.output, agent_return=ret)
         except ErrorFromCloudException as e:
             if e.status_code == 401:
@@ -591,6 +605,8 @@ class AgentExecutor:
         except FailCommandException as e:
             return ExecResponse(result_code=AgentExecResult.failCommand, error_message=e.message,
                                 user_message=e.message, path=e.path)
+        except HookRefused:
+            raise
         except InvokedAgentFailed as e:
             return ExecResponse(result_code=AgentExecResult.failCommand, error_message=f"{e}",
                                 user_message=e.user_message(), path=e.path)
@@ -606,6 +622,8 @@ class AgentExecutor:
             return ExecResponse(result_code=AgentExecResult.unexpected, error_message=message)
         finally:
             _calling_path.reset(agent_path_token)
+            _replay_state.reset(replay_token)
+            _answers_scope.reset(answers_token)
             for mcp in self.mcps.values():
                 try:
                     await mcp.close()

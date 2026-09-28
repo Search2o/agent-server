@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 import logging
 import logging.config
@@ -21,8 +21,11 @@ from importlib.metadata import PackageNotFoundError, version
 
 _LICENSE_ENV = "SEARCH2O_LICENSE_KEY"
 _LICENSE_FILE_ENV = "SEARCH2O_LICENSE_KEY_FILE"
+_LICENSE_PREFIX = "s2o_"
+_LICENSE_KEY_LENGTH = 22
+_LICENSE_KEY = rf"{_LICENSE_PREFIX}[0-9A-Za-z]{{{_LICENSE_KEY_LENGTH}}}"
 _LICENSE_WORD = r"[\x21-\x2E\x30-\x7E]+"
-_LICENSE_PATTERN = re.compile(rf"^{_LICENSE_WORD}(/{_LICENSE_WORD})?$")
+_LICENSE_PATTERN = re.compile(rf"^{_LICENSE_KEY}(/{_LICENSE_WORD})?$")
 
 _LICENSE_HELP_TEXT = """ \
     License key
@@ -92,6 +95,7 @@ class BuildConfig:
     def check_license(cls, key: str, source: str) -> None:
         if _LICENSE_PATTERN.match(key):
             return
+        lic, slash, suffix = key.partition("/")
         if not key:
             problem = "it is empty"
         elif any(c.isspace() for c in key):
@@ -103,13 +107,21 @@ class BuildConfig:
                            + ", ".join(repr(c) for c in wrong))
             elif key.count("/") > 1:
                 problem = "it has more than one '/' in it"
-            elif key.startswith("/"):
+            elif not lic:
                 problem = "it has nothing before the '/'"
-            else:
+            elif slash and not suffix:
                 problem = "it has nothing after the '/'"
+            elif not lic.startswith(_LICENSE_PREFIX):
+                problem = f"it does not start with '{_LICENSE_PREFIX}'"
+            elif len(lic) != len(_LICENSE_PREFIX) + _LICENSE_KEY_LENGTH:
+                problem = (f"the part after '{_LICENSE_PREFIX}' is {len(lic) - len(_LICENSE_PREFIX)} "
+                           f"characters long instead of {_LICENSE_KEY_LENGTH}")
+            else:
+                problem = f"the part after '{_LICENSE_PREFIX}' has characters other than letters and numbers"
         raise InitializationError(
             f"The license key in {source} is not in the right format, because {problem}. "
-            f"A license key is one word, on its own or followed by '/' and a configuration name. "
+            f"A license key is '{_LICENSE_PREFIX}' followed by {_LICENSE_KEY_LENGTH} letters and numbers, "
+            f"on its own or followed by '/' and a configuration name. "
             f"Copy it again from https://search2o.com.")
 
     @classmethod

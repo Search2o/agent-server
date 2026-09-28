@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
@@ -44,13 +44,20 @@ class CommandName(StrEnum):
 
     progress = auto() # Include a progress element to the agent execution result stream
     trace = auto() # Include a trace element to the agent execution result stream
-    log = auto() # Log from the agent server. These are not sent to the Search2o cloud.
+    log = auto() # Log from the agent server. These are not sent to Search2o Cloud.
     output = auto() # When set, this value is used as the agent's output. Otherwise, the value returned by 'main' task is used. Setting this does not change the control flow.
 
     end = auto() # Ends the agent successfully, saving its state
     fail = auto() # Ends the agent with a failure message, and state is not saved
 
     var = auto() # Sets variables
+
+
+RESULT_PRODUCING_COMMANDS = frozenset({
+    CommandName.api, CommandName.db, CommandName.llm, CommandName.search,
+    CommandName.invoke, CommandName.func, CommandName.ask, CommandName.memory,
+    CommandName.parallel,
+})
 
 
 class ReadOnlyVariable(StrEnum):
@@ -73,8 +80,8 @@ class ThemeType(StrEnum):
     system = auto()
 
 class UiPrefModel(BaseModel):
-    theme: ThemeType = Field(default=ThemeType.system, title="Theme", description="The color scheme of the UI.")
-    lang: str = Field(default="en", title="Language", description="The language of the UI. Only English is supported today.")
+    theme: ThemeType = Field(default=ThemeType.system, title="Theme", description="The color scheme of the Search2o application.")
+    lang: str = Field(default="en", title="Language", description="The language of the Search2o application. Only English is supported today.")
 
 class ServiceLevel(StrEnum):
     free = "free"
@@ -187,7 +194,7 @@ class AskInputModel(BaseModel):
     description: SafeStr = Field(default="", title="Input description", description="Help text shown to the user under the input.", max_length=80)
     options: list[SafeStr] = Field(default_factory=list, title="Options", description="The values the user chooses from, for chooseOne and chooseMany.")
     default: SafeStr | None = Field(default=None, title="Default value", description="The value the input starts with.")
-    hidden: bool = Field(default=False, title="Hidden", description="Sent back from the UI without being shown to the user.")
+    hidden: bool = Field(default=False, title="Hidden", description="Sent back by the Search2o application without being shown to the user.")
 
     @field_validator("name")
     @classmethod
@@ -239,6 +246,7 @@ class AuditEntryType(StrEnum):
     sysvar = auto()
     search = auto()
     apiConnectionPools = "apiConnectionPools"
+    hooks = auto()
     llm = auto()
     api = auto()
     mcp = auto()

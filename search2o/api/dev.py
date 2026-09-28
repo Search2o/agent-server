@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 import asyncio
 from typing import Annotated, Self
@@ -11,13 +11,14 @@ from pydantic import BaseModel, EmailStr, Field, JsonValue, model_validator
 from starlette.responses import StreamingResponse
 
 from search2o.api.admin import api_connection_pool_names
-from search2o.api.exec import stop_when_client_leaves
+from search2o.api.exec import stop_when_client_leaves, HOOKS_NOT_LOADED
 from search2o.common.enums import TraceType
 from search2o.common.rest_call import RestCall
-from search2o.common.exceptions import ShowMessage
+from search2o.common.exceptions import ShowMessage, error_message
 from search2o.common.sensitivestring import SensitiveString
 from search2o.execution.agentexec import AgentExec
 from search2o.execution.encryptor import Encryptor
+from search2o.execution.hooks import Hooks
 from search2o.execution.conversationrun import ConversationRun, ExecStartResponseModel
 from search2o.execution.runref import RunRef
 from search2o.execution.runtime import Runtime, RuntimeState
@@ -99,6 +100,10 @@ class AgentResponseModel(BaseResponseModel):
                                     description="The labels this agent stores memories under. Deleting the agent deletes every user's memories under these labels.")
     invokedBy: list[str] = Field(default_factory=list, title="Invoked by",
                                  description="The published agents that invoke this agent. The agent cannot be deleted while this is not empty.")
+    descriptor: DescriptorModel = Field(default_factory=DescriptorModel, title="Descriptor", description="What the agent does, which is what a search matches a user's query against. Empty when the agent has no descriptor.")
+    descriptorVersion: int = Field(default=0, title="Descriptor version", description="Version of the descriptor, in epoch milliseconds. Send it back with publishDescriptor. It is 0 when the agent has no descriptor.", json_schema_extra={"format": "int64"})
+    lastDescriptorUpdatedByName: str | None = Field(default=None, title="Descriptor last updated by", description="Name of the user who last updated the descriptor.")
+    lastDescriptorUpdatedByEmail: str | None = Field(default=None, title="Descriptor last updated by email", description="Email of the user who last updated the descriptor.")
 
 
 class PastVersionModel(BaseModel):
@@ -109,18 +114,6 @@ class PastVersionModel(BaseModel):
 
 class PastVersionsResponseModel(BaseResponseModel):
     pastVersions: list[PastVersionModel] = Field(..., description="List of past versions of a versioned object in the last three months.")
-
-
-class GetDescriptorResponseModel(BaseResponseModel):
-    descriptor: DescriptorModel = Field(default_factory=DescriptorModel, description="Descriptor definition in JSON.")
-    lastDescriptorUpdatedByEmail: str | None = Field(default=None, description="Email of the user who last updated the agent descriptor.", title="Last updated by")
-    lastDescriptorUpdatedByName: str | None = Field(default=None, description="Name of the user who last updated the agent descriptor.", title="Last updated by email")
-    lastAgentUpdatedByName: str = Field(..., description="Name of the user who last updated the agent definition.")
-    lastAgentUpdatedByEmail: str = Field(..., description="Email of the user who last updated the agent definition.")
-    descriptorVersion: int = Field(default=0, description="Version of the descriptor, typically the epoch milliseconds time it was last updated.", json_schema_extra={"format": "int64"})
-    agentVersion: int = Field(default=0, description="Version of the agent definition in epoch milliseconds.")
-    agentTitle: str = Field(..., description="Title of the agent.")
-    isLocked: bool = Field(default=False, description="Specifies whether the descriptor is locked, which means that it is being indexed at this time.")
 
 
 # ----- drafts -----
@@ -220,8 +213,22 @@ class PublishDraftResponseModel(BaseResponseModel):
 
 @dev_router.post("/publishDraft", response_model=PublishDraftResponseModel, summary="Publish a draft agent", description="This publishes the draft agent to the system.")
 async def publishDraft(item: DraftidModel, request: Request) -> PublishDraftResponseModel:
+    name = ""
+    if Hooks.has("onAgentPublish"):
+        draft = await RestCall.passthrough_method(request, "getDraft", {"draftid": item.draftid})
+        name = draft.get("draftName") or ""
     ret = await RestCall.passthrough(request, item.model_dump())
-    return PublishDraftResponseModel.model_validate(ret)
+    response = PublishDraftResponseModel.model_validate(ret)
+    if name and response.success:
+        try:
+            agent = await RestCall.passthrough_method(request, "getAgent", {"agentName": name})
+            await Hooks.call("onAgentPublish", lambda: {
+                "agentName": agent.get("agentName"), "agentVersion": agent.get("agentVersion"),
+                "agentDefinition": agent.get("agentDefinition"), "agentTitle": agent.get("agentTitle"),
+                "agentTag": agent.get("agentTag"), "userEmail": agent.get("lastUpdatedByEmail")})
+        except Exception as e:
+            raise ShowMessage(f"The agent was published, but the onAgentPublish hook failed: {error_message(e)}")
+    return response
 
 
 class DeleteDraftModel(RequestModel):
@@ -258,9 +265,17 @@ async def getAgentList(item: GetAgentListModel, request: Request) -> GetAllAgent
     return GetAllAgentsResponseModel.model_validate(ret)
 
 
-@dev_router.post("/getAgent", response_model=AgentResponseModel, summary="Get an agent", description="Gets an agent definition.")
+@dev_router.post("/getAgent", response_model=AgentResponseModel, summary="Get an agent", description="Gets an agent's definition and its descriptor.")
 async def getAgent(item: AgentNameModel, request: Request) -> AgentResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
+    descriptor = ret.get("descriptor")
+    if isinstance(descriptor, str) and descriptor:
+        try:
+            ret["descriptor"] = DescriptorModel.model_validate_json(await Encryptor.decrypt_str(request, descriptor))
+        except Exception:
+            ret["descriptor"] = DescriptorModel(description="Decryption error")
+    elif isinstance(descriptor, str):
+        ret["descriptor"] = DescriptorModel()
     return AgentResponseModel.model_validate(ret)
 
 
@@ -310,25 +325,16 @@ async def updateTag(item: UpdateTagModel, request: Request) -> BaseResponseModel
 @dev_router.post("/deleteAgent", response_model=BaseResponseModel, summary="Delete an agent", description="Deletes an agent from the system. This can be done only after removing the agent from the search index.")
 async def deleteAgent(item: AgentNameModel, request: Request) -> BaseResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
-    return BaseResponseModel.model_validate(ret)
+    response = BaseResponseModel.model_validate(ret)
+    if response.success:
+        try:
+            await Hooks.call("onAgentDelete", lambda: {"agentName": item.agentName})
+        except Exception as e:
+            raise ShowMessage(f"The agent was deleted, but the onAgentDelete hook failed: {error_message(e)}")
+    return response
 
 
 # ----- descriptors and indexing -----
-
-@dev_router.post("/getDescriptor", response_model=GetDescriptorResponseModel, summary="Get an agent descriptor", description="Gets an agent descriptor. An agent descriptor describes the agent in a textual format. This is what a search matches a user query against.")
-async def getDescriptor(item: AgentNameModel, request: Request) -> GetDescriptorResponseModel:
-    ret = await RestCall.passthrough(request, item.model_dump())
-    descriptor = ret.get("descriptor")
-    if isinstance(descriptor, str) and descriptor:
-        try:
-            ret["descriptor"] = DescriptorModel.model_validate_json(
-                await Encryptor.decrypt_str(request, descriptor))
-        except Exception:
-            ret["descriptor"] = DescriptorModel(description="Decryption error")
-    elif isinstance(descriptor, str):
-        ret["descriptor"] = DescriptorModel()
-    return GetDescriptorResponseModel.model_validate(ret)
-
 
 class PublishDescriptorModel(RequestModel):
     agentName: AgentName
@@ -457,15 +463,15 @@ class DraftValidation(BaseModel):
     convid: str
 
 
-def _environment_problems(results: list[ValidationResult], runtime: RuntimeState) -> list[ValidationResult]:
+async def _environment_problems(results: list[ValidationResult], runtime: RuntimeState) -> list[ValidationResult]:
     problems = []
-    secrets = SecretsManager(runtime.secrets_model)
+    secrets = SecretsManager(runtime.secrets_model, {})
     for r in results:
         if r.vtype == ValidationResultType.allowlistItem and r.detail not in runtime.allowlist.eval_allowlist:
             problems.append(ValidationResult(vtype=r.vtype, path=r.path, detail=f"{r.detail!r} is not in the Allowlist."))
         elif r.vtype == ValidationResultType.secret:
             try:
-                secrets[r.detail]
+                await secrets.fetch(r.detail)
             except ShowMessage:
                 problems.append(ValidationResult(vtype=r.vtype, path=r.path, detail=f"Secret {r.detail!r} was not found."))
     return problems
@@ -473,6 +479,9 @@ def _environment_problems(results: list[ValidationResult], runtime: RuntimeState
 async def _validate_draft_internal(item: ValidateDraftModel, request: Request, stream_iter: StreamIter | None,
                                 run_ref: RunRef | None = None)-> ValidateDraftResponseModel:
     vr = ValidateDraftResponseModel(draftid=item.draftid, validationSuccess=False) # This enforces access
+    if Hooks.errors:
+        vr.runtimeError = HOOKS_NOT_LOADED
+        return vr
     stream_iter.trace(lambda: "Looking for compile errors and security checks on python expressions", TraceType.flow)
     try:
         validate_response = DraftValidation.model_validate(await RestCall.call_method(request, "validateDraft", {"draftid": item.draftid}))
@@ -482,16 +491,17 @@ async def _validate_draft_internal(item: ValidateDraftModel, request: Request, s
             runtime = Runtime.current()
         else:
             runtime = await Runtime.start_agent_exec(request, validate_response.configUpdatedAt, validate_response.convid)
-        vr.validationErrors += _environment_problems(results, runtime)
+        vr.validationErrors += await _environment_problems(results, runtime)
         if not vr.validationErrors:
             stream_iter.trace(lambda: "No compile errors and security concerns. Running the agent against the validation query", TraceType.flow)
             draft = DraftResponseModel.model_validate(await RestCall.passthrough_method(request, "getDraft", {"draftid": item.draftid})) # Same object includes both
             if draft.validationQuery:
                 agent_exec = AgentExec.create_for_draft(draft.draftName, draft.agentTitle,
-                                                        validate_response.draftAgentDefinition)
+                                                        validate_response.draftAgentDefinition,
+                                                        [r.detail for r in results if r.vtype == ValidationResultType.secret])
                 if item.followup:
                     convid = validate_response.convid
-                    state = await RestCall.get_state(request, convid)
+                    state = (await RestCall.get_state(request, convid)).text
                     if not state:
                         stream_iter.trace(lambda: "Could not find the state.", TraceType.error)
                         vr.runtimeError = "Validation cannot be run on the follow-up query as the stored state could not be found."

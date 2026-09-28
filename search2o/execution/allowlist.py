@@ -1,17 +1,15 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 import builtins
 import importlib
-import inspect
 import types
 from types import ModuleType
 from typing import Any, Union
 from collections.abc import Callable
 
-from search2o.llm.llmadapter import LlmAdapter
 from search2o.models.systemconfig import EvalAllowlistModel
 
 _ImportedObject = Union[Callable[..., Any], type, ModuleType, Any]
@@ -40,11 +38,9 @@ class Allowlist:
     def __init__(self, ew: EvalAllowlistModel):
         self.errors: dict[str, str] = {}
         self.ew = ew
-        self.llm_adapters = []
 
         mutable: dict[str, _ImportedObject] = self.build_eval_allowlist(self.ew.allowlist)
         self.eval_allowlist: types.MappingProxyType[str, _ImportedObject] = types.MappingProxyType(mutable)
-        self.check_llm_adapters()
 
     def resolve(self, spec: str, builtin_classes: set[str], line: str = "") -> tuple[str, _ImportedObject] | None:
         try:
@@ -80,11 +76,6 @@ class Allowlist:
         except Exception:
             self.errors[line or spec] = "Could not be imported."
         return None
-
-
-    def resolve_function(self, name: str) -> _ImportedObject | None:
-        ret = self.resolve(name, self.builtin_classes())
-        return ret[1] if ret else None
 
 
     def strip_comment(self, line: str) -> str:
@@ -193,11 +184,3 @@ class Allowlist:
                     break
         return set(names)
 
-    def check_llm_adapters(self):
-        for name, cl in self.eval_allowlist.items():
-            if inspect.isclass(cl) and issubclass(cl, LlmAdapter):
-                try:
-                    obj = cl() # Assumes a no-arg constructor
-                    self.llm_adapters.append(obj)
-                except Exception as e:
-                    self.errors[name] = f"This is a subclass of LlmAdapter, but produces errors while instantiating with a default constructor: {e}"

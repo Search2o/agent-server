@@ -1,29 +1,32 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
 from enum import StrEnum, auto
 from typing import Literal, Annotated, TypeAlias, Self
 
-from pydantic import BaseModel, Field, JsonValue, PrivateAttr, AfterValidator, model_validator
+from pydantic import BaseModel, Field, JsonValue, AfterValidator, model_validator
 
 from .configtypes import SystemConfigPart, AgentConfigPart, AuthMethod, ProfileName, TagFilter, ExprString, DynamicDict
 from .schemaobjects import ServiceLevel
 
 ProfileDoc = Annotated[str, Field(default="", title="Documentation", description="Documentation of what this profile is used for. This field is optional. It can be useful in generating agent definitions.", max_length=500)]
 
+class SecretsUsedModel(BaseModel):
+    secretsUsed: list[str] = Field(default_factory=list, title="Secrets used", description="The secret names this profile's expressions read (sys.secret['NAME']). Worked out by the cloud when the profile is saved and sent with the profile to agent servers; anything sent in this field is ignored.")
+
 class NamedBaseModel(BaseModel):
     name: ProfileName = Field(..., title="Name", description="The name this profile is referred to by, in agents and in other configuration.")
     doc: ProfileDoc = Field(..., title="Notes", description="Free-text notes about this profile, for whoever maintains the configuration.")
 
 class TimeoutModel(BaseModel):
-    connect: float = Field(default=10.0, title="Connection timeout (seconds)", description="How long to wait to establish the TCP/TLS connection.")
-    read: float = Field(default=300.0, title="Read timeout (seconds)", description="How long to wait for response bytes.")
-    write: float = Field(default=30.0, title="Write timeout (seconds)", description="How long to wait while sending the request body.")
-    pool: float = Field(default=10.0, title="Pool timeout (seconds)", description="How long to wait for a free connection from the pool.")
+    connect: float = Field(default=10.0, title="Connection timeout (seconds)", description="How long to wait to establish the TCP/TLS connection, in seconds.")
+    read: float = Field(default=300.0, title="Read timeout (seconds)", description="How long to wait for response bytes, in seconds.")
+    write: float = Field(default=30.0, title="Write timeout (seconds)", description="How long to wait while sending the request body, in seconds.")
+    pool: float = Field(default=10.0, title="Pool timeout (seconds)", description="How long to wait for a free connection from the pool, in seconds.")
 
 class ConnectionPoolModel(BaseModel):
     maxConnections: int = Field(
@@ -39,7 +42,7 @@ class ConnectionPoolModel(BaseModel):
     keepaliveExpiry: int = Field(
         default=60,
         title="Keep-alive expiry (seconds)",
-        description="How long an idle connection is kept before it is closed.",
+        description="How long an idle connection is kept before it is closed, in seconds.",
     )
     timeout: TimeoutModel = Field(default_factory=TimeoutModel, title="Timeouts", description="The connect, read, write and pool timeouts for calls made through this pool.")
 
@@ -59,14 +62,9 @@ class ApiConnectionPoolModel(ConnectionPoolModel):
         default=None,
         title="Private key file",
         description=(
-            "PEM file containing the private key. May be omitted when the "
+            "PEM file containing the private key, unencrypted. May be omitted when the "
             "private key is included in clientCertFile."
         ),
-    )
-    privateKeyPasswordSecret: str | None = Field(
-        default=None,
-        title="Private key password secret",
-        description="Name of the secret that holds the password for the encrypted private key, if required.",
     )
 
 
@@ -90,7 +88,7 @@ class PathAdd(StrEnum):
     cannot = auto()
     must = auto()
 
-class ApiServerModel(NamedBaseModel):
+class ApiServerModel(NamedBaseModel, SecretsUsedModel):
     type: Literal[AgentConfigPart.api] = Field(default=AgentConfigPart.api, title="Config part", description="Identifies which configuration part this is.")
     url: ExprString = Field(
         ...,
@@ -154,7 +152,7 @@ class DbConnectionPool(BaseModel):
     )
 
 
-class DbConnectionModel(NamedBaseModel):
+class DbConnectionModel(NamedBaseModel, SecretsUsedModel):
     type: Literal[AgentConfigPart.db] = Field(default=AgentConfigPart.db, title="Config part", description="Identifies which configuration part this is.")
     connectionString: ExprString | None = Field(default=None, title="Connection string", description="The database connection string. It must specify an async driver installed in your Python environment: sqlite+aiosqlite, mysql+aiomysql, postgresql+asyncpg or oracle+oracledb.")
     connectionPool: DbConnectionPool = Field(default_factory=DbConnectionPool, title="Connection pool", description="Pool settings for connections to this database.")
@@ -175,7 +173,7 @@ SafeMcpName = Annotated[
 ]
 
 
-class McpServerModel(BaseModel):
+class McpServerModel(SecretsUsedModel):
     type: Literal[AgentConfigPart.mcp] = Field(default=AgentConfigPart.mcp, title="Config part", description="Identifies which configuration part this is.")
     name: SafeMcpName = Field(..., title="Name", description="The name agents use to refer to this MCP server.")
     doc: ProfileDoc = Field(..., title="Notes", description="Free-text notes about this server, for whoever maintains the configuration.")
@@ -201,7 +199,7 @@ class ModelDetails(BaseModel):
     inputImage: float = Field(default=0, title="Input image", description="Price per million input image tokens.")
     outputImage: float = Field(default=0, title="Output image", description="Price per million output image tokens.")
 
-class LlmModel(NamedBaseModel):
+class LlmModel(NamedBaseModel, SecretsUsedModel):
     type: Literal[AgentConfigPart.llm] = Field(default=AgentConfigPart.llm, title="Config part", description="Identifies which configuration part this is.")
     vendor: str = Field(default="openai", title="Vendor", description="The LLM vendor. Reports are organized under this name.")
     adapter: str = Field(default="openai", title="Adapter", description="The adapter class that connects to this LLM. It must implement the LlmAdapter interface and be on the allowlist.")
@@ -222,8 +220,8 @@ class LlmModel(NamedBaseModel):
 
 class PromptProfileModel(NamedBaseModel):
     type: Literal[AgentConfigPart.prompt] = Field(default=AgentConfigPart.prompt, title="Config part", description="Identifies which configuration part this is.")
-    system: str | None = Field(default=None, title="System prompt", description="The system prompt. Usually set once per conversation. Stored encrypted; the Search2o cloud never holds the text.")
-    user: str | None = Field(default=None, title="User prompt", description="The user prompt. Can be set many times; those set before one LLM call are merged into a single string. Stored encrypted; the Search2o cloud never holds the text.")
+    system: str | None = Field(default=None, title="System prompt", description="The system prompt. Usually set once per conversation. Stored encrypted; Search2o Cloud never holds the text.")
+    user: str | None = Field(default=None, title="User prompt", description="The user prompt. Can be set many times; those set before one LLM call are merged into a single string. Stored encrypted; Search2o Cloud never holds the text.")
 
 class SecretConversionOptions(StrEnum):
     upper = auto()
@@ -238,32 +236,25 @@ class SecretTransformModel(BaseModel):
 class SecretSource(StrEnum):
     env = auto()
     file = auto()
-    hosted = auto()
+    vault = auto()
 
 
 class AgentSecretsModel(BaseModel):
     type: Literal[SystemConfigPart.secrets] = Field(default=SystemConfigPart.secrets, title="Config part", description="Identifies which configuration part this is.")
-    secretSource: SecretSource = Field(default=SecretSource.env, title="Secrets source", description="Where secrets are read from.")
-    transform: SecretTransformModel = Field(default_factory=SecretTransformModel, title="Name transform", description="Applied to a secret's name before the environment variable is read or the file is opened.")
-    secretsEncrypted: str | None = Field(default=None, description="Encrypted secrets, for hosted secrets. Sent only between the Search2o cloud and the agent server.", title="Encrypted secrets")
-    secrets: dict[str, str] | None = Field(default=None, title="Secrets", description="Decrypted secrets, for hosted secrets. Never sent to the Search2o cloud.")
-
-    _cache: dict[str, str] = PrivateAttr(default_factory=dict)
-
-    @property
-    def cache(self) -> dict[str, str]:
-        return self._cache
-
-    @cache.setter
-    def cache(self, value: dict[str, str]) -> None:
-        self._cache = value
-
+    secretSource: SecretSource = Field(default=SecretSource.env, title="Secrets source", description="Where secrets are read from. A secret an agent or a profile reads is fetched before it is used.")
+    transform: SecretTransformModel | None = Field(default=None, title="Name transform", description="Applied to a secret's name before the environment variable is read or the file is opened.")
+    cacheMinutes: int = Field(
+        default=60,
+        title="Cache duration (minutes)",
+        description="How long to cache a secret after retrieval. "
+                    "0 disables caching; a negative value caches until the application stops.",
+    )
 
 class CookieModel(BaseModel):
     key: Literal["search2o_session"] = Field(default="search2o_session", title="Cookie name", description="The name of the session cookie.")
     path: Literal["/"] = Field(default="/", title="Path", description="The path the cookie is sent for.")
     httponly: Literal[True] = Field(default=True, title="HTTP only", description="Whether the cookie is hidden from JavaScript. Leave on unless a client needs to read it.")
-    max_age: int = Field(default=86400, title="Max age (seconds)", description="How long the cookie lives.")
+    max_age: int = Field(default=86400, title="Max age (seconds)", description="How long the cookie lives, in seconds.")
     domain: str = Field(default="", title="Domain", description="The domain the cookie is valid for.")
     secure: bool = Field(default=True, title="Require HTTPS", description="Whether the browser sends the cookie only over HTTPS.")
     samesite: Literal["Lax", "Strict", "None"] = Field(default="Lax", title="SameSite policy", description="When the browser sends the cookie on cross-site requests.")
@@ -283,7 +274,7 @@ class PasswordModel(BaseModel):
     passwordRules: str = Field(
         default="Minimum 2 each of lower, upper, number and special characters",
         title="Password help",
-        description="Help text shown in the UI describing these rules.",
+        description="Help text the Search2o application shows describing these rules.",
     )
 
     @model_validator(mode="after")
@@ -330,7 +321,7 @@ class OidcAuthModel(BaseModel):
     method: Literal[AuthMethod.oidc] = Field(default=AuthMethod.oidc, title="Sign-in method", description="Identifies which sign-in method this is.")
     issuer: str = Field(..., title="Issuer", description="The provider's issuer URL, such as https://login.example.com. Its configuration is read from there, and it is what the 'iss' claim must match.", max_length=500)
     clientId: str = Field(..., title="Client id", description="The client id this account was registered with at the provider.", max_length=200)
-    returnUrl: str = Field(..., title="Return address", description="Where the identity provider sends the browser after signing in: the Search2o UI as it is reached from a browser, such as https://search2o.example.com/ui. Register this same address at the provider as the application's redirect URI - the two must match exactly, or the provider refuses the sign-in. One address for the account.", max_length=500)
+    returnUrl: str = Field(..., title="Return address", description="Where the identity provider sends the browser after signing in: the Search2o application as it is reached from a browser, such as https://search2o.example.com/ui. Register this same address at the provider as the application's redirect URI - the two must match exactly, or the provider refuses the sign-in. One address for the account.", max_length=500)
     clientSecret: str = Field(default="", title="Client secret", description="The client secret the provider issued for this registration. Search2o Cloud uses it to exchange a sign-in code for tokens; it is encrypted at rest and never returned. Leave it empty on an update to keep the stored one.", max_length=2000)
     scopes: list[str] = Field(default_factory=lambda: ["openid", "profile", "email"], title="Scopes", description="What to ask the provider for. The email and name are read from the result, so both are needed.", max_length=20)
     requireVerifiedEmail: bool = Field(default=True, title="Require a verified email", description="Whether the provider must say the email address is verified. Leave it on unless your provider never sends that claim.")
@@ -394,14 +385,14 @@ class SysVar(BaseModel):
 
 class AgentValidationModel(BaseModel):
     type: Literal[SystemConfigPart.validation] = Field(default=SystemConfigPart.validation, title="Config part", description="Identifies which configuration part this is.")
-    maxAgentRuntime: int = Field(default=600, title="Max agent runtime (seconds)", description="How long an agent may run before it is stopped.")
+    maxAgentRuntime: int = Field(default=600, title="Max agent runtime (seconds)", description="How long an agent may run before it is stopped, in seconds.")
     maxIterationLoops: int = Field(default=1_000_000, title="Max loop iterations",
                                    description="The most iterations a 'while' or 'for' may run. A loop inside a loop is counted separately.", ge=0)
     yieldLoopsAfter: int = Field(default=1_000, title="Yield loops after", description="How many iterations a loop runs before yielding, so the runtime limit can be checked.")
     dbMaxRows: int = Field(default=10000, title="Max rows from a db call", description="The most rows a single db command may return.")
     agentMaxLength: int = Field(default=20480, title="Max agent length", description="The most characters an agent definition may contain.")
-    maxLlmPrice: float = Field(default=1, title="Max LLM cost per run", description="The agent is stopped once a call takes its spend past this amount.")
-    streamHeartbeat: int = Field(default=15, title="Stream heartbeat (seconds)", description="How often a noop is sent on an idle output stream, so browsers and proxies do not close it while the agent works.", ge=1)
+    maxLlmPrice: float = Field(default=1, title="Max LLM cost per run", description="The agent is stopped once a call takes its spend past this amount, in US dollars.")
+    streamHeartbeat: int = Field(default=15, title="Stream heartbeat (seconds)", description="How often a noop is sent on an idle output stream, in seconds, so browsers and proxies do not close it while the agent works.", ge=1)
     checkSerializationErrors: bool = Field(default=False, title="Check serialization errors", description="Every variable value must be JSON serializable. This is always checked while validating a draft; turning it on also checks it on every run and writes what it finds to the server log.")
 
 class EvalAllowlistModel(BaseModel):
@@ -445,15 +436,15 @@ class AgentServerRoute(StrEnum):
     reports = auto()
 
 class AgentServerModel(BaseModel):
-    uiPath: str = Field(default="/ui", title="UI path", description="The path the bundled UI is served at. Leave it empty to not serve the UI at all.")
+    uiPath: str = Field(default="/ui", title="Application path", description="The path the bundled Search2o application is served at. Leave it empty to not serve it at all.")
     routes: list[AgentServerRoute] | None = Field(default=None, title="Route list", description="The list of routes to serve.")
-    connectPageUrl: str = Field(default="", title="Connect page URL", description="The page where a user approves an integration's request for access. Leave it empty and it follows the UI path above, which is what keeps the two in step. Set a page under that path for a UI of your own, such as connect, or a full address for a UI hosted elsewhere, such as https://ui.example.com/connect. Whatever is set must point at where the UI is really served. The request is added to it as a query parameter named c.")
+    connectPageUrl: str = Field(default="", title="Connect page URL", description="The page where a user approves an integration's request for access. Leave it empty and it follows the application path above, which is what keeps the two in step. Set a page under that path for an application of your own, such as connect, or a full address for one hosted elsewhere, such as https://ui.example.com/connect. Whatever is set must point at where the application is really served. The request is added to it as a query parameter named c.")
     allowCrossOrigin: list[str] = Field(default_factory=lambda: ["*"], title="Allowed CORS origins", description="Other origins allowed to call this API, such as https://ui.example.com.")
     docsUrl: str | None = Field(default="/docs", title="Docs URL", description="Where the API documentation is served.")
     redocUrl: str | None = Field(default="/redoc", title="ReDoc URL", description="Where the ReDoc documentation is served.")
     openapiUrl: str | None = Field(default="/openapi.json", title="OpenAPI URL", description="Where the OpenAPI schema is served.")
     logs: dict[str, JsonValue] = Field(default_factory=dict, title="Logging", description="Logging configuration for the agent server.")
-    cloudPool: ConnectionPoolModel = Field(default_factory=ConnectionPoolModel, title="Cloud connection pool", description="How this agent server connects to the Search2o cloud. It carries connection settings only: it is deliberately not one of the API connection pools, and it has no certificate fields, so nothing configured for an agent can change how this server reaches the Search2o cloud. A server behind a proxy that re-signs TLS trusts that proxy through the SSL_CERT_FILE environment variable, which is where a machine-wide trust setting belongs. Changing any of this needs an agent server restart.")
+    cloudPool: ConnectionPoolModel = Field(default_factory=ConnectionPoolModel, title="Cloud connection pool", description="How this agent server connects to Search2o Cloud. It carries connection settings only: it is deliberately not one of the API connection pools, and it has no certificate fields, so nothing configured for an agent can change how this server reaches Search2o Cloud. A server behind a proxy that re-signs TLS trusts that proxy through the SSL_CERT_FILE environment variable, which is where a machine-wide trust setting belongs. Changing any of this needs an agent server restart.")
 
 
 class AgentServerModels(BaseModel):
@@ -499,9 +490,40 @@ class EncryptionKey(BaseModel):
 
 class EncryptionModel(BaseModel):
     type: Literal[SystemConfigPart.encryption] = Field(default=SystemConfigPart.encryption, title="Config part", description="Identifies which configuration part this is.")
-    encryptionSource: EncryptionSource = Field(default=EncryptionSource.cloud, title="Encryption source", description="By default Search2o manages a key for this account. Override this to use end-to-end encryption.")
-    keys: list[EncryptionKey] = Field(default_factory=list, title="Keys", description="The keys in use. The last one is current, and only the last three months of keys need to be kept.")
-    keyFunction: str | None = Field(default=None, title="Key function", description="The function that returns the encryption key for a key name.")
+    encryptionSource: EncryptionSource = Field(default=EncryptionSource.cloud, title="Encryption source", description="By default Search2o manages a key for this account. Override this to use end-to-end encryption, which needs the encryptionKey hook.")
+    keys: list[EncryptionKey] = Field(default_factory=list, title="Keys", description="The keys in use. The last one is current. Keep every key that stored data still uses: conversation state for the account's conversation retention period, pinned conversations for as long as they are kept, and memories for a year after their last use.")
+
+ImportPath = Annotated[str, Field(
+    pattern=r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$", max_length=200,
+    title="Import path",
+    description="A dotted Python import path, such as mycompany.hooks.on_agent_end, naming a function or class installed on every agent server of this account.")]
+
+
+class HooksModel(BaseModel):
+    type: Literal[SystemConfigPart.hooks] = Field(default=SystemConfigPart.hooks, title="Config part", description="Python functions and classes this server calls at set points. They are loaded when the agent server starts, so a change takes effect only after a restart. A path that cannot be loaded is logged, and the agent server then refuses to run agents until it is fixed. Every function must be async and takes one dict argument holding what is relevant to the call, including isValidation. Only vault, encryptionKey and restore return a value. To refuse, a function raises an exception, and its message is shown as it is. The code must be installed on every agent server of this account.")
+    onStart: ImportPath | None = Field(default=None, title="On server start", description="Called once when the agent server starts. If it raises, the server does not start.")
+    onEnd: ImportPath | None = Field(default=None, title="On server stop", description="Called when the agent server shuts down normally. It is not called if the process is killed. If it raises, the message is logged.")
+    onAgentStart: ImportPath | None = Field(default=None, title="On agent start", description="Called before a top-level agent runs, with isNewConversation and startFromAsk. It is not called for agents that another agent invokes. If it raises, the agent stops.")
+    onAgentEnd: ImportPath | None = Field(default=None, title="On agent end", description="Called after a top-level agent finishes successfully or pauses to ask, with endWithAsk, before the run is recorded. It is not called for agents that another agent invokes. If it raises, the agent fails.")
+    onAgentError: ImportPath | None = Field(default=None, title="On agent error", description="Called after a top-level agent fails, before the run is recorded. It is not called for agents that another agent invokes. If it raises, its message is reported as the error.")
+    onAgentPublish: ImportPath | None = Field(default=None, title="On agent publish", description="Called after an agent is published, with its name, version, definition, title, tag and the publisher's email. If it raises, the caller gets an error that says the agent was published.")
+    onAgentDelete: ImportPath | None = Field(default=None, title="On agent delete", description="Called after an agent is deleted, with its name. If it raises, the caller gets an error that says the agent was deleted.")
+    save: ImportPath | None = Field(default=None, title="Save conversation state", description="Stores a conversation's state, given convid, state, userEmail and agentName. The state is not encrypted by this server, and ownership is not checked by Search2o Cloud. Validation runs keep their state in Search2o Cloud. Set together with restore and deleteConversation.")
+    restore: ImportPath | None = Field(default=None, title="Restore conversation state", description="Returns the state stored by save for a convid, or None when there is none. It also receives userEmail, so it can check who owns the conversation. Set together with save and deleteConversation.")
+    deleteConversation: ImportPath | None = Field(default=None, title="Delete conversation state", description="Deletes the state stored by save for a convid. Set together with save and restore. Expiring stored state is the customer's responsibility.")
+    vault: ImportPath | None = Field(default=None, title="Secrets vault", description="Returns the value of a secret, given its name, for the vault secret source. Called before an agent runs, for each secret the agent reads.")
+    encryptionKey: ImportPath | None = Field(default=None, title="Encryption key", description="Returns the encryption key as bytes, given keyName, for end-to-end encryption.")
+    beforeLlmCall: ImportPath | None = Field(default=None, title="Before an LLM call", description="Called with each request before it is sent to a language model. It cannot change the request. If it raises, the agent stops.")
+    afterLlmCall: ImportPath | None = Field(default=None, title="After an LLM call", description="Called with each response from a language model. It cannot change the response. If it raises, the agent stops.")
+    beforeApiCall: ImportPath | None = Field(default=None, title="Before an API call", description="Called before an api command sends its request, with the method, URL, headers, query parameters, body and profile. If it raises, the request is not sent and the agent stops.")
+    llmAdapters: list[ImportPath] = Field(default_factory=list, title="LLM adapters", description="LlmAdapter classes that add support for more language model vendors. Each must build with no arguments.")
+    agentConfigValidators: dict[AgentConfigPart, ImportPath] = Field(default_factory=dict, title="Agent configuration validators", description="A function per agent configuration part that checks a profile before it is saved, given the profile. If it raises, the save is refused with its message.")
+
+    @model_validator(mode="after")
+    def state_hooks_together(self) -> Self:
+        if len({self.save is None, self.restore is None, self.deleteConversation is None}) > 1:
+            raise ValueError("Set save, restore and deleteConversation together, or none of them.")
+        return self
 
 
 SystemConfigModelUnion: TypeAlias = Annotated[
@@ -514,7 +536,8 @@ SystemConfigModelUnion: TypeAlias = Annotated[
         | EvalAllowlistModel
         | SysVar
         | SearchOptionsModel
-        | ApiConnectionPoolsModel,
+        | ApiConnectionPoolsModel
+        | HooksModel,
         Field(discriminator="type"),
 ]
 
@@ -532,7 +555,7 @@ class AgentRuntime(BaseModel):
     accountName: str = Field(default='', title="Account name", description="The name of this account, so a client sees a rename without an agent server restart.")
     serviceLevel: ServiceLevel = Field(default=ServiceLevel.free, title="Service level", description="What this account is entitled to, free or paid.")
     serverIp: str = Field(default='', title="Server IP", description="The address this agent server is reached at, so it refreshes without a restart.")
-    docsweb: str = Field(default="https://docs.search2o.com/docsweb", title="UI docs", description="UI uses certain dynamic fields which are served from the web.")
+    docsweb: str = Field(default="https://docs.search2o.com/docsweb", title="Application docs", description="The Search2o application reads certain dynamic fields from this address.")
     updatedSystemConfigs: dict[str, SystemConfigModelUnion] = Field(default_factory=dict, title="System configuration", description="The system configuration parts that changed since the agent server last asked.")
     updatedAgentConfigs: dict[str, list[AgentConfigModelUnion]] = Field(default_factory=dict, title="Agent configuration", description="The agent configuration profiles that changed since the agent server last asked.")
     passwordHelp: str = Field(default='', title="Password help", description="The password rules text, shown wherever a password is chosen.")
@@ -544,5 +567,6 @@ class AgentRuntime(BaseModel):
 
 class InitModel(BaseModel):
     agentServer: AgentServerModel = Field(..., title="Agent server", description="The settings this agent server starts with.")
+    hooks: HooksModel = Field(default_factory=HooksModel, title="Hooks", description="The hooks this agent server loads when it starts.")
 
 

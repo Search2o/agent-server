@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 import asyncio
 
@@ -10,6 +10,7 @@ from pydantic import Field, JsonValue
 from starlette.responses import StreamingResponse
 
 from search2o.execution.conversationrun import ConversationRun, ExecStartResponseModel
+from search2o.execution.hooks import Hooks
 from search2o.common.rest_call import RestCall
 from search2o.common.exceptions import ErrorFromCloudException
 from search2o.models.schemaobjects import AgentExecResult, AgentTitleModel
@@ -87,6 +88,19 @@ async def execAgent(item: ExecuteAgentModel, request: Request) -> StreamingRespo
         return await _exec_agent_internal(item, request, iter1)
 
 
+HOOKS_NOT_LOADED = "This agent server has configuration errors, so it cannot run agents. Ask your administrator to check its logs."
+
+
+class HooksNotLoaded(Exception):
+    pass
+
+
+class HookFailed(Exception):
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 class UnknownConversation(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -98,11 +112,14 @@ async def _exec_agent_internal(item: ExecuteAgentModel, request: Request, iter1:
     agent_name = item.agentName
     convid = item.convid
     try:
+        if Hooks.errors:
+            raise HooksNotLoaded()
+        state_in_hook = False
         if convid:
-            state, start_agent_response = await asyncio.gather(
+            (state, state_in_hook, _), start_agent_response = await asyncio.gather(
                 RestCall.get_state(request, convid),
                         RestCall.passthrough_method(request, "startAgentExec",{ "isNewConv": False}))
-            if not state:
+            if not state and not state_in_hook:
                 raise UnknownConversation("This conversation has expired. Please start a new one.")
         else:
             state = None
@@ -112,15 +129,36 @@ async def _exec_agent_internal(item: ExecuteAgentModel, request: Request, iter1:
         if not srm.convid:
             srm.convid = convid
         await Runtime.start_agent_exec(request, srm.configUpdatedAt, srm.convid)
+        if state_in_hook:
+            try:
+                state = await ConversationRun.restore_state(convid, srm.userEmail)
+            except Exception as e:
+                raise HookFailed(error_message(e)) from e
+            if not state:
+                raise UnknownConversation("This conversation has expired. Please start a new one.")
 
         agent_exec = await Runtime.get_agent(request, agent_name)
-        run = await ConversationRun.create(request, srm, item.inputs, agent_exec, iter1, state, run_ref)
+        run = await ConversationRun.create(request, srm, item.inputs, agent_exec, iter1, state, run_ref,
+                                           state_in_hook)
         if run.paused_on_another_agent:
             raise UnknownConversation("This conversation is waiting for your answers to another agent. "
                                       "Continue it with that agent.")
+        if run.paused_on_older_version:
+            raise UnknownConversation("This agent has been updated since it asked its questions, so the answers "
+                                      "cannot be used. Please start a new conversation.")
     except ErrorFromCloudException as e:
         rc = AgentExecResult.mustLogin.name if e.status_code == 401 else AgentExecResult.callFailed
         ret = ExecAgentResponseModel(success=False, resultCode=rc, error=ErrorResponseModel(message=e.detail))
+        iter1.done_agent(ret)
+        return ret
+    except HooksNotLoaded:
+        ret = ExecAgentResponseModel(success=False, resultCode=AgentExecResult.unexpected,
+                                     error=ErrorResponseModel(message=HOOKS_NOT_LOADED))
+        iter1.done_agent(ret)
+        return ret
+    except HookFailed as e:
+        ret = ExecAgentResponseModel(success=False, resultCode=AgentExecResult.errorInAgent,
+                                     error=ErrorResponseModel(message=e.message))
         iter1.done_agent(ret)
         return ret
     except UnknownConversation as e:

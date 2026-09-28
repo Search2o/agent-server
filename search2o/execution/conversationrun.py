@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
@@ -16,16 +16,18 @@ from pydantic import BaseModel
 from search2o.common.enums import TraceType
 from search2o.common.epoch import Epoch
 from search2o.common.exceptions import ShowMessage, error_message
+from search2o.common.flowcontrol import HookRefused
 from search2o.common.mylogger import MyLogger
 from search2o.common.rest_call import RestCall
 from search2o.common.sensitivestring import JsonValue
 from search2o.execution.agent_state import AgentOutput, AgentRun, ConversationState
 from search2o.execution.agentexec import AgentExec
 from search2o.execution.encryptor import Encryptor
+from search2o.execution.hooks import Hooks
 from search2o.execution.llmresponse import LlmResult, LlmTokens
 from search2o.execution.runref import RunRef
 from search2o.execution.runtime import RuntimeState, Runtime
-from search2o.execution.statenodes import Node, FunctionNode, FuncCommandNode, InvokeCommandNode
+from search2o.execution.statenodes import Node, FunctionNode, FuncCommandNode, InvokeCommandNode, ParallelCommandNode
 from search2o.execution.streamiter import StreamIter
 from search2o.models.apimodels import ErrorResponseModel, ExecAgentResponseModel
 from search2o.models.prompt import LlmResponseModel, ToolCalls
@@ -70,11 +72,13 @@ class ConversationRun:
         if runs and runs[-1].callstack:
             last_run = runs[-1]
             self.paused_agent_name: str | None = last_run.agentName
+            self.paused_agent_version: int = last_run.agentVersion
             self.prev_state: list[Node] = last_run.callstack
             self.ask_answers: dict[str, Any] | None = inputs
             self.inputs: dict[str, Any] = last_run.inputs
         else:
             self.paused_agent_name = None
+            self.paused_agent_version = 0
             self.prev_state = []
             self.ask_answers = None
             self.inputs = inputs
@@ -96,12 +100,13 @@ class ConversationRun:
     @classmethod
     async def create(cls, request: Request, item: ExecStartResponseModel, inputs: dict[str, JsonValue],
                      agent_exec: AgentExec, stream_iter: StreamIter, state: str | None = None,
-                     run_ref: RunRef | None = None) -> ConversationRun:
+                     run_ref: RunRef | None = None, state_in_hook: bool = False) -> ConversationRun:
         runtime = Runtime.current()
         stream_iter.trace(lambda: f"Executing agent: {agent_exec.agent_title} ({agent_exec.agent_name})", TraceType.flow)
         conversation_state = None
         if state:
-            conversation_state = ConversationState.model_validate_json(await Encryptor.decrypt(request, runtime, state))
+            plain = state if state_in_hook else await Encryptor.decrypt(request, runtime, state)
+            conversation_state = ConversationState.model_validate_json(plain)
         run = cls(request=request, convid=item.convid, user_email=item.userEmail,
                   stream_iter=stream_iter, run_ref=run_ref, runtime=runtime, agent_exec=agent_exec,
                   inputs=inputs, conversation_state=conversation_state,
@@ -109,24 +114,76 @@ class ConversationRun:
         return run
 
     @property
+    def paused_on_older_version(self) -> bool:
+        return (bool(self.prev_state) and not self.is_validation_run and self.paused_agent_name == self.agent_name
+                and self.paused_agent_version != self.agent_version)
+
+    @property
     def paused_on_another_agent(self) -> str:
         return self.paused_agent_name if self.paused_agent_name and self.paused_agent_name != self.agent_name else ""
+
+    @staticmethod
+    async def restore_state(convid: str, user_email: str) -> str | None:
+        if not Hooks.has("restore"):
+            raise ShowMessage("This conversation was saved by the save hook, but the restore hook is not set up.")
+        return await Hooks.call("restore", lambda: {"convid": convid, "userEmail": user_email, "isValidation": False})
+
+    @property
+    def state_in_hook(self) -> bool:
+        return Hooks.has("save") and not self.is_validation_run
+
+    def hook_args(self, **more: Any) -> dict[str, Any]:
+        return {"convid": self.convid, "agentName": self.agent_name, "agentVersion": self.agent_version,
+                "userEmail": self.user_email, "query": self.query, "inputs": self.inputs,
+                "isValidation": self.is_validation_run, **more}
+
+    @staticmethod
+    def hook_failure(e: Exception, output: AgentOutput) -> ExecResponse:
+        from search2o.execution.agent_executor import ExecResponse
+        message = e.message if isinstance(e, HookRefused) else error_message(e)
+        return ExecResponse(result_code=AgentExecResult.errorInAgent, output=output,
+                            error_message=message, user_message=message)
 
     async def execute(self) -> ExecAgentResponseModel:
         from search2o.execution.agent_executor import AgentExecutor, ExecResponse
 
         self.exec_start_time = Epoch.ms()
+        try:
+            await Hooks.call("onAgentStart", lambda: self.hook_args(
+                isNewConversation=not self.conversation_state.runs, startFromAsk=bool(self.prev_state)))
+        except Exception as e:
+            return self.response(await self.record(await self.after_hooks(self.hook_failure(e, self.output))))
+
         ae = AgentExecutor(run=self, agent_exec=self.agent_exec, inputs=self.inputs)
         try:
             async with asyncio.timeout(self.runtime.validation.maxAgentRuntime):
                 er = await ae.exec_agent()
+        except HookRefused as e:
+            er = self.hook_failure(e, self.output)
         except asyncio.TimeoutError:
             er = ExecResponse(result_code=AgentExecResult.timedOut,
                               error_message=f"Agent execution timed out after {self.runtime.validation.maxAgentRuntime} "
                                             f"seconds, as set in the configuration.")
 
         self.callstack = ae.callstack
-        return self.response(await self.record(er))
+        return self.response(await self.record(await self.after_hooks(er)))
+
+    async def after_hooks(self, er: ExecResponse) -> ExecResponse:
+        if er.result_code in (AgentExecResult.success, AgentExecResult.ask):
+            try:
+                await Hooks.call("onAgentEnd", lambda: self.hook_args(
+                    resultCode=str(er.result_code), endWithAsk=er.result_code == AgentExecResult.ask,
+                    output=self.output.model_dump(mode="json")))
+                return er
+            except Exception as e:
+                self.callstack = []
+                return self.hook_failure(e, self.output)
+        try:
+            await Hooks.call("onAgentError", lambda: self.hook_args(
+                resultCode=str(er.result_code), errorMessage=er.error_message, path=er.path))
+        except Exception as e:
+            er.error_message = er.user_message = error_message(e)
+        return er
 
     async def record(self, er: ExecResponse) -> ExecResponse:
         from search2o.execution.agent_executor import ExecResponse
@@ -232,6 +289,10 @@ class ConversationRun:
             elif isinstance(node, InvokeCommandNode):
                 self.check_values_lost(node.inputs, f"Input to the invoked agent {node.agent_name!r}", errors)
                 self.check_callstack_errors(node.nodes, errors)
+            elif isinstance(node, ParallelCommandNode):
+                self.check_values_lost(node.results, "Result of a function that ran in parallel", errors)
+                for nodes in node.paused.values():
+                    self.check_callstack_errors(nodes, errors)
 
     @staticmethod
     def check_values_lost(values: dict[str, Any], what: str, errors: list[str]) -> None:
@@ -268,12 +329,17 @@ class ConversationRun:
             "llmCost": self.llmCost,
             "llmDuration": self.llmDuration,
             "memories": {"add": await self.encrypted_memories(self.capped_memories(self.memories_add, "stored")),
-                         "remove": self.capped_memories(self.memories_remove, "deleted")}
+                         "remove": self.capped_memories(self.memories_remove, "deleted")},
+            "stateInHook": self.state_in_hook
         }
         await RestCall.call_method(self.request, "agentExecuted", d)
 
     async def save_state(self):
         state = self.serialize()
+        if self.state_in_hook:
+            await Hooks.call("save", lambda: {"convid": self.convid, "state": state, "userEmail": self.user_email,
+                                      "agentName": self.agent_name, "isValidation": self.is_validation_run})
+            return
         state_en = await Encryptor.encrypt(self.request, self.runtime, state)
         await RestCall.save_state(self.request, self.convid, state_en)
 

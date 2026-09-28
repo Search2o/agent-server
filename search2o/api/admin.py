@@ -1,9 +1,8 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
-import json
 from inspect import signature
 from typing import Any, cast
 from collections.abc import Awaitable
@@ -17,6 +16,7 @@ from search2o.common.mylogger import MyLogger
 from search2o.common.sensitivestring import SensitiveString
 from search2o.execution.allowlist import Allowlist
 from search2o.execution.encryptor import Encryptor
+from search2o.execution.hooks import Hooks
 from search2o.execution.runtime import Runtime, PROMPT_DECRYPTION_ERROR
 from search2o.models.apimodels import ErrorResponseModel, BaseResponseModel, EmptyRequestModel, PagedRequestModel, RequestModel
 from search2o.models.configtypes import SystemConfigPart, AgentConfigPart, ServiceAccountName
@@ -273,10 +273,7 @@ class ConfigPartResponseModel(BaseResponseModel):
 @admin_router.post("/getSystemConfigPart", response_model=ConfigPartResponseModel, summary="Get a configuration", description="Gets one of the configurations. See the documentation for more details.")
 async def getSystemConfigPart(item: ConfigPartRequestModel, request: Request)-> ConfigPartResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
-    model = ConfigPartResponseModel.model_validate(ret)
-    if item.part == SystemConfigPart.secrets:
-        await _decrypt_secrets(model.configValue, request)
-    return model
+    return ConfigPartResponseModel.model_validate(ret)
 
 
 class AgentConfigPartRequestModel(RequestModel):
@@ -407,7 +404,7 @@ async def updateSystemConfigPart(item: UpdateSystemConfigPartModel, request: Req
             return UpdateConfigPartResponseModel(success=False, configVersion=0, errors=al.errors,
                                                  error=ErrorResponseModel(message="The Allowlist has errors."))
     elif item.configValue.type == SystemConfigPart.secrets:
-        await _validate_secrets_update(item.configValue, request)
+        _validate_secrets_update(item.configValue)
     elif item.configValue.type == SystemConfigPart.encryption:
         await _validate_encryption(item.configValue, request)
 
@@ -439,68 +436,27 @@ async def _check_pools_not_in_use(model: BaseModel, request: Request):
 
 async def _validate_encryption(model: BaseModel, request: Request):
     em = cast(EncryptionModel, model)
-    if em.encryptionSource == EncryptionSource.client:
-        if em.keyFunction:
-            rs = Runtime.current()
-            kf = rs.allowlist.eval_allowlist.get(em.keyFunction)
-            if kf:
-                if em.keys:
-                    ek = em.keys[-1]
-                    if '|' in ek.keyName:
-                        raise ShowMessage(f"{ek.keyName} cannot contain '|'")
-                    try:
-                        k_awaitable = kf(ek.keyName)
-                    except Exception:
-                        raise ShowMessage(f"{em.keyFunction} threw an exception when called with {ek.keyName}")
-
-                    if not isinstance(k_awaitable, Awaitable):
-                        raise ShowMessage(f"{em.keyFunction} must be async")
-                    try:
-                        k = await k_awaitable
-                    except Exception:
-                        raise ShowMessage(f"{em.keyFunction} threw an exception when called with {ek.keyName}")
-                    if not isinstance(k, bytes):
-                        raise ShowMessage(f"{em.keyFunction} must return bytes")
-                    if not Encryptor.is_valid_key(k):
-                        raise ShowMessage(f"{em.keyFunction} did not return a valid AESGCM key for {ek.keyName}")
-            else:
-                raise ShowMessage(f"{em.keyFunction} is not found in the allowlist.")
-        else:
-            raise ShowMessage("Must specify a key function name. See the documentation.")
+    if em.encryptionSource != EncryptionSource.client:
+        return
+    if not Hooks.has("encryptionKey"):
+        raise ShowMessage("End-to-end encryption needs the encryptionKey hook. Set it up and restart the agent server first.")
+    if em.keys:
+        ek = em.keys[-1]
+        if '|' in ek.keyName:
+            raise ShowMessage(f"{ek.keyName} cannot contain '|'")
+        try:
+            k = await Hooks.call("encryptionKey", lambda: {"keyName": ek.keyName})
+        except Exception as e:
+            raise ShowMessage(f"The encryptionKey hook failed for {ek.keyName}: {error_message(e)}")
+        if not isinstance(k, bytes):
+            raise ShowMessage("The encryptionKey hook must return bytes.")
+        if not Encryptor.is_valid_key(k):
+            raise ShowMessage(f"The encryptionKey hook did not return a valid AESGCM key for {ek.keyName}.")
 
 
-async def _validate_secrets_update(model: BaseModel, request: Request):
-    secrets_model = cast(AgentSecretsModel, model)
-    if secrets_model.secretSource == SecretSource.hosted:
-        rs = Runtime.current()
-        if rs.encryption_model.encryptionSource != EncryptionSource.client:
-            raise ShowMessage("To use hosted secrets, you should first set up end-to-end encryption. See the documentation for more details.")
-        if secrets_model.secrets:
-            ss = json.dumps(secrets_model.secrets)
-            try:
-                secrets_model.secretsEncrypted = await Encryptor.encrypt(request, rs, ss)
-                secrets_model.secrets = None
-            except Exception:
-                raise ShowMessage("Error encrypting secrets.")
-        else:
-            secrets_model.secretsEncrypted = None
-            secrets_model.secrets = None
-    else:
-        secrets_model.secretsEncrypted = None
-        secrets_model.secrets = None
-
-async def _decrypt_secrets(model: BaseModel, request: Request):
-    secrets_model = cast(AgentSecretsModel, model)
-    if secrets_model.secretSource == SecretSource.hosted:
-        if secrets_model.secretsEncrypted:
-            rs = Runtime.current()
-            try:
-                decrypted = await Encryptor.decrypt(request, rs, secrets_model.secretsEncrypted)
-            except Exception:
-                raise ShowMessage("Error decrypting secrets.")
-            if decrypted:
-                secrets_model.secrets = json.loads(decrypted)
-            secrets_model.secretsEncrypted = None
+def _validate_secrets_update(model: BaseModel):
+    if cast(AgentSecretsModel, model).secretSource == SecretSource.vault and not Hooks.has("vault"):
+        raise ShowMessage("The vault secret source needs the vault hook. Set it up and restart the agent server first.")
 
 class UpsertAgentConfigPartModel(RequestModel):
     configValue: AgentConfigModelUnion
@@ -511,6 +467,10 @@ class UpsertAgentConfigPartResponseModel(BaseResponseModel):
 
 @admin_router.post("/upsertAgentConfigPart", response_model=UpsertAgentConfigPartResponseModel, summary="Add or update a collection config object", description="Add or update one of the objects in a collection configuration. See the documentation for more details.")
 async def upsertAgentConfigPart(item: UpsertAgentConfigPartModel, request: Request)-> UpsertAgentConfigPartResponseModel:
+    try:
+        await Hooks.validate_config(item.configValue.type, lambda: {"profile": item.configValue.model_dump(mode="json")})
+    except Exception as e:
+        raise ShowMessage(error_message(e))
     if item.configValue.type in (AgentConfigPart.llm, AgentConfigPart.api):
         _check_connection_pool(item.configValue.connectionPoolName, await api_connection_pool_names(request))
     elif item.configValue.type == AgentConfigPart.prompt:

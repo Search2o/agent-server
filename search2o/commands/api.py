@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from pydantic import JsonValue
 
+from search2o.execution.hooks import Hooks
 from search2o.common.enums import AgentWords, TraceType
 from search2o.common.exceptions import SERVICE_RETRY, ShowMessage, ErrorInAgent, error_message
 from search2o.common.mtimeout import m_timeout
@@ -97,6 +98,7 @@ class ApiCommand(CommandExec):
         if not profile:
             raise ShowMessage(f"API profile {profile_name} not found")
         pool_name = profile.connectionPoolName
+        await executor.secrets.prefetch(profile.secretsUsed)
         url = await executor.eval_expr(function, f"{path}.profile.{profile_name}.url", profile.url, ExpectedType.strt)
         url, base_params = split_query(url)
         command_path_params: dict[str, JsonValue] = {}
@@ -138,6 +140,10 @@ class ApiCommand(CommandExec):
                                    f"queryParams={json.dumps(SensitiveString.safe_dict(params), indent=2)}, "
                                    f"body={json.dumps(SensitiveString.safe_dict(body), indent=2)}"
                                    , TraceType.input, inv.path)
+        await Hooks.guard("beforeApiCall", lambda: {"convid": executor.convid, "agentName": executor.agent_name,
+                                            "userEmail": executor.user_email, "profile": profile_name,
+                                            "method": method, "url": url, "headers": headers, "queryParams": params,
+                                            "body": body, "isValidation": executor.run.is_validation_run})
         try:
             async with m_timeout(timeout): # If timeout is not specified, this does not enforce a timeout
                 result = await executor.runtime.network.call_rest(pool_name, method, url, headers, params, body)

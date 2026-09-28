@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
@@ -52,6 +52,12 @@ class FuncCommandNode(CommandNode):
     name: str # Name of the function to be called
     args: dict[str, Any] # Function's arguments
 
+class ParallelCommandNode(CommandNode):
+    ntype: Literal["parallel"] = "parallel"
+    results: dict[str, Any] = Field(default_factory=dict)
+    paused: dict[str, list[NodeUnion]] = Field(default_factory=dict)
+    plainAsk: dict[str, bool] = Field(default_factory=dict)
+
 
 class CommandListNode(Node):  # commands, do, then, else
     ntype: Literal["commandlist"] = "commandlist"
@@ -71,6 +77,7 @@ NodeUnion: TypeAlias = Annotated[
     | WhileCommandNode
     | AskCommandNode
     | FuncCommandNode
+    | ParallelCommandNode
     | LlmCommandNode
     | CommandListNode
     | FunctionNode,

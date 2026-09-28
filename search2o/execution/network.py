@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
@@ -53,6 +53,10 @@ class Network(Closable):
         return pool
 
     @staticmethod
+    def _encrypted_key() -> bytes:
+        raise ValueError("the private key is encrypted, and only unencrypted private keys are supported")
+
+    @staticmethod
     def ssl_context(pname: str, pool_model: ApiConnectionPoolModel) -> ssl.SSLContext | bool:
         if not pool_model.caCertFile and not pool_model.clientCertFile:
             return True
@@ -65,18 +69,10 @@ class Network(Closable):
         else:
             context = httpx.create_ssl_context()
         if pool_model.clientCertFile:
-            password = None
-            if pool_model.privateKeyPasswordSecret:
-                from search2o.execution.runtime import Runtime
-                try:
-                    password = Runtime.current().secret(pool_model.privateKeyPasswordSecret)
-                except Exception as e:
-                    raise ShowMessage(f"The private key password of the API connection pool {pname!r} could not "
-                                      f"be read: {SensitiveString.safe_text(error_message(e))}")
             try:
                 context.load_cert_chain(certfile=pool_model.clientCertFile,
                                         keyfile=pool_model.privateKeyFile or None,
-                                        password=password or None)
+                                        password=Network._encrypted_key)
             except Exception as e:
                 raise ShowMessage(f"The client certificate of the API connection pool {pname!r} could not be loaded: "
                                   f"{error_message(e)}")

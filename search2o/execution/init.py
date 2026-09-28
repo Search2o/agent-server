@@ -1,21 +1,27 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
+from search2o.common.exceptions import error_message
+from search2o.common.mylogger import MyLogger
 from search2o.common.rest_call import RestCall
+from search2o.config.config import Config
 from search2o.execution.agent_executor import Name2Command
+from search2o.execution.hooks import Hooks
 from search2o.execution.runtime import Runtime
 from search2o.models.schemaobjects import CommandName
 
 
 class Init:
+    started: bool = False
 
     @classmethod
     async def init_all(cls) -> None:
         await RestCall.init()
+        Hooks.load(Config.init_model.hooks)
 
         from search2o.commands.api import ApiCommand
         from search2o.commands.ask import AskCommand
@@ -87,8 +93,17 @@ class Init:
 
         }
         await Runtime.update()
+        await Hooks.call("onStart", lambda: {})
+        cls.started = True
 
     @classmethod
     async def close_all(cls):
+        if cls.started:
+            try:
+                await Hooks.call("onEnd", lambda: {})
+            except Exception as e:
+                message = f"The onEnd hook failed: {error_message(e)}"
+                MyLogger.error(message)
+                print(message, flush=True)
         await RestCall.close()
         await Runtime.close()

@@ -1,12 +1,13 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
+import json
 import traceback
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 from fastapi import Request
@@ -24,6 +25,12 @@ class CloudErrorResponseModel(BaseModel):
     errorData: dict[str, Any] | None = None
 
 _REPORT_MESSAGE_MAX = 2000
+
+
+class StoredState(NamedTuple):
+    text: str
+    in_hook: bool = False
+    user_email: str = ""
 
 
 class RestCall:
@@ -131,10 +138,12 @@ class RestCall:
         return d
 
     @classmethod
-    async def get_state(cls, request: Request, convid: str) -> str:
-        params = {}
-        params["convid"] = convid
-        return await cls.call_method(request, "getState", params, False)
+    async def get_state(cls, request: Request, convid: str) -> StoredState:
+        text = await cls.call_method(request, "getState", {"convid": convid}, False)
+        if text.startswith("{"):
+            d = json.loads(text)
+            return StoredState("", bool(d.get("stateInHook")), d.get("userEmail") or "")
+        return StoredState(text)
 
     @classmethod
     async def report_error(cls, request: Request, message: str, exc: Exception)-> None:

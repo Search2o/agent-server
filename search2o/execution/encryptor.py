@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from starlette.requests import Request
 
 from search2o.common.exceptions import ShowMessage, error_message
+from search2o.execution.hooks import Hooks
 from search2o.models.systemconfig import EncryptionSource
 
 if TYPE_CHECKING:
@@ -79,6 +80,12 @@ class Encryptor:
 
 
     @classmethod
+    async def _client_key(cls, key_name: str) -> bytes:
+        if not Hooks.has("encryptionKey"):
+            raise ShowMessage("End-to-end encryption needs the encryptionKey hook, which is not set up.")
+        return await Hooks.call("encryptionKey", lambda: {"keyName": key_name})
+
+    @classmethod
     async def encrypt(
             cls,
             request: Request | None,
@@ -93,11 +100,7 @@ class Encryptor:
                     key_to_key: str = model.keys[-1].keyName
                 except IndexError:
                     raise ShowMessage("No encryption key defined")
-                kf = runtime.key_function
-                if kf:
-                    key = await kf(key_to_key)
-                else:
-                    raise ShowMessage("Unexpected encryption error - Bad key function")
+                key = await cls._client_key(key_to_key)
             else:
                 marker = cls.SERVER_ENCRYPTION_MARKER
                 key_to_key: str = await cls._get_current_encrypted_key(request)
@@ -134,11 +137,7 @@ class Encryptor:
         try:
             marker, version, key_to_key, payload = cls._split_marker(encrypted_text)
             if marker == cls.CLIENT_ENCRYPTION_MARKER:
-                kf = runtime.key_function
-                if kf:
-                    key = await kf(key_to_key)
-                else:
-                    raise ShowMessage("Unexpected encryption error - Bad key function")
+                key = await cls._client_key(key_to_key)
             else:
                 key = await cls._get_encryption_key(request, key_to_key)
 

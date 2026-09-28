@@ -1,7 +1,7 @@
 # Copyright (c) 2025-present Search2o, Inc.
 # All rights reserved. Proprietary software.
 # Running or operating this software requires valid, ongoing authorization from Search2o.
-# See the LICENSE.md file and https://search2o.com/legal/license.txt.
+# See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ class DbCommand(CommandExec):
         if not profile_config:
             raise ShowMessage(f"Unknown database profile {profile_name}")
         connection_pool = profile_config.connectionPool
+        await executor.secrets.prefetch(profile_config.secretsUsed)
         connection_string = await executor.eval_expr(function, f"{path}.profile.{profile_name}.connectionString", profile_config.connectionString, ExpectedType.strt)
         if not connection_string:
             raise ShowMessage(f"Database profile {profile_name} does not specify a connection string")
