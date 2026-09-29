@@ -22,6 +22,8 @@ class Init:
     async def init_all(cls) -> None:
         await RestCall.init()
         Hooks.load(Config.init_model.hooks)
+        if Hooks.errors:
+            await RestCall.report_server_event("error", "Some hooks could not be loaded.")
 
         from search2o.commands.api import ApiCommand
         from search2o.commands.ask import AskCommand
@@ -99,6 +101,7 @@ class Init:
     @classmethod
     async def close_all(cls):
         if cls.started:
+            await RestCall.report_server_event("shutdown")
             try:
                 await Hooks.call("onEnd", lambda: {})
             except Exception as e:

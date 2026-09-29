@@ -100,6 +100,8 @@ class Network(Closable):
         except Exception as e:
             from search2o.common.mylogger import MyLogger
             MyLogger.error(f"Error ({type(e)}) connecting to URL in API connection pool {pname or self.default_pool_name}: {SensitiveString.safe_url(url)}")
+            from search2o.common.rest_call import RestCall
+            RestCall.report_error_once("An API call could not connect.")
             raise
 
     async def _get(self, pname: str | None, url: str, headers: dict[str, Any], params: dict[str, Any]) -> Response:

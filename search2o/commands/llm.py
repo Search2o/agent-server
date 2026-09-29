@@ -353,6 +353,8 @@ class LlmCommand(CommandExec):
         except Exception as ex:
             message = f"LLM call to {req.vendor}/{req.model} failed. Transport error - {error_message(ex)}"
             MyLogger.error(message)
+            from search2o.common.rest_call import RestCall
+            RestCall.report_error_once("An LLM call could not connect.")
             raise LlmError(message)
 
 

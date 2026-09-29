@@ -49,12 +49,16 @@ class Database(Closable):
             except ModuleNotFoundError as e:
                 error_message = _missing_driver_message(e.name)
                 MyLogger.error(f"{error_message} Connection string: {SensitiveString.safe_connection_string(connection_string)}")
+                from search2o.common.rest_call import RestCall
+                RestCall.report_error_once("A database driver is not installed.")
                 raise ShowMessage(error_message)
             except Exception:
                 message = f"Database connection could not be created using the profile '{profile_name}'" \
                     if profile_name else "Database connection could not be created. Make sure the package exists and it is an async driver"
                 error_message = f"{message}: {SensitiveString.safe_connection_string(connection_string)}"
                 MyLogger.error(error_message)
+                from search2o.common.rest_call import RestCall
+                RestCall.report_error_once("A database connection could not be created.")
                 raise ShowMessage(error_message)
         return self._engine_cache[connection_string]
 

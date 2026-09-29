@@ -442,9 +442,28 @@ class ProfilesResponseModel(BaseResponseModel):
     profiles: dict[str, list[ProfileInfoModel]] = Field(default_factory=dict, description="The configured profiles, grouped by type: llm, api, mcp, db and prompt. Each entry carries the profile's name and its documentation.")
 
 
-@dev_router.post("/getProfiles", response_model=ProfilesResponseModel, summary="Get the configured profiles", description="Gets every configured profile, grouped by type (llm, api, mcp, db, prompt), each with its name and documentation. Useful when writing agents that reference profiles.")
+@dev_router.post("/getProfiles", response_model=ProfilesResponseModel, summary="Get the configured profiles", description="Gets every configured profile, grouped by type (llm, api, mcp, db, prompt), each with its name and documentation. A profile that reads a secret this agent server cannot find is left out. Useful when writing agents that reference profiles.")
 async def getProfiles(item: EmptyRequestModel, request: Request) -> ProfilesResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
+    runtime = Runtime.current()
+    secrets = SecretsManager(runtime.secrets_model, runtime.secret_cache)
+    readable: dict[str, bool] = {}
+
+    async def can_read(name: str) -> bool:
+        if name not in readable:
+            try:
+                await secrets.fetch(name)
+                readable[name] = True
+            except ShowMessage:
+                readable[name] = False
+        return readable[name]
+
+    for part, profiles in (ret.get("profiles") or {}).items():
+        kept = []
+        for profile in profiles:
+            if all([await can_read(name) for name in profile.get("secretsUsed") or []]):
+                kept.append(profile)
+        ret["profiles"][part] = kept
     return ProfilesResponseModel.model_validate(ret)
 
 

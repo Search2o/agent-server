@@ -17,6 +17,8 @@ This repository contains the **Search2o Agent Server**: a stateless, asynchronou
 pip install search2o
 ```
 
+The `pip` package includes the GUI. Cloning the GitHub repository does not include it.
+
 ### 2. Get a license key
 
 Running this server requires a license key. Get one at **[Getting started](https://search2o.com/gettingstarted.html)**.

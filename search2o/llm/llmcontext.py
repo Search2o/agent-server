@@ -38,5 +38,7 @@ class AllLlmContexts:
                 self.contexts[name] = LlmContext(llm, adapter)
             else:
                 MyLogger.error(f"Could not find adapter for LLM {name}")
+                from search2o.common.rest_call import RestCall
+                RestCall.report_error_once("An LLM profile names an adapter that does not exist.")
 
         self.adapter_names = {k: v.description() for k, v in adapters.items()}

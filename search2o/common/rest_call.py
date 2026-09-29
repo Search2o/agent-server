@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import traceback
 from typing import Any, NamedTuple
@@ -144,6 +145,30 @@ class RestCall:
             d = json.loads(text)
             return StoredState("", bool(d.get("stateInHook")), d.get("userEmail") or "")
         return StoredState(text)
+
+    _reported: set[str] = set()
+    _report_tasks: set[asyncio.Task] = set()
+
+    @classmethod
+    def report_error_once(cls, message: str) -> None:
+        if message in cls._reported:
+            return
+        cls._reported.add(message)
+        try:
+            task = asyncio.get_running_loop().create_task(cls.report_server_event("error", message))
+        except RuntimeError:
+            return
+        cls._report_tasks.add(task)
+        task.add_done_callback(cls._report_tasks.discard)
+
+    @classmethod
+    async def report_server_event(cls, event: str, message: str = "") -> None:
+        try:
+            await cls.call_method(None, "reportServerEvent",
+                                  {"event": event, "message": message[:_REPORT_MESSAGE_MAX]},
+                                  client=await cls.get_client(), timeout=cls.ERROR_TIMEOUT)
+        except Exception as e:
+            MyLogger.warning(f"Could not report the server event {event!r} to the cloud: {error_message(e)}")
 
     @classmethod
     async def report_error(cls, request: Request, message: str, exc: Exception)-> None:

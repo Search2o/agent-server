@@ -66,6 +66,7 @@ async def _decrypt_titles(request: Request, conversations: list) -> None:
             except Exception as e:
                 c.title = "Decryption error"
                 MyLogger.error(f"Could not decrypt the title of conversation {c.convid}: {SensitiveString.safe_text(str(e))}")
+                RestCall.report_error_once("A conversation title could not be decrypted.")
 
 
 class ChangePasswordModel(RequestModel):

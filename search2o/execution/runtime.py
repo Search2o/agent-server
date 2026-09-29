@@ -77,6 +77,12 @@ class RuntimeState:
 
         new_allowlist_model = self._d2m(ar, SystemConfigPart.allowlist)
         self.allowlist = Allowlist(new_allowlist_model) if new_allowlist_model is not None else prev.allowlist
+        if new_allowlist_model is not None and self.allowlist.errors:
+            entries = "; ".join(f"{entry.strip()}: {reason}" for entry, reason in self.allowlist.errors.items())
+            MyLogger.error(f"These allowlist entries could not be loaded on this agent server, so agents cannot use "
+                           f"them here: {entries}")
+            from search2o.common.rest_call import RestCall
+            RestCall.report_error_once("Some allowlist entries could not be loaded on this agent server.")
 
         if AgentConfigPart.prompt in ar.updatedAgentConfigs:
             for profile in self.prompts.values():
@@ -87,6 +93,8 @@ class RuntimeState:
                             setattr(profile, field, await Encryptor.decrypt(request, self, text))
                         except Exception as e:
                             MyLogger.error(f"Could not decrypt the {field} prompt of profile {profile.name!r}: {SensitiveString.safe_text(error_message(e))}")
+                            from search2o.common.rest_call import RestCall
+                            RestCall.report_error_once("A prompt profile could not be decrypted.")
                             setattr(profile, field, PROMPT_DECRYPTION_ERROR)
 
         if SystemConfigPart.secrets in ar.updatedSystemConfigs:

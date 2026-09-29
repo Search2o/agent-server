@@ -309,6 +309,7 @@ async def _decrypt_prompt_profile(profile: PromptProfileModel, request: Request)
                 setattr(profile, field, await Encryptor.decrypt_str(request, text))
             except Exception as e:
                 MyLogger.error(f"Could not decrypt the {field} prompt of profile {profile.name!r}: {SensitiveString.safe_text(error_message(e))}")
+                RestCall.report_error_once("A prompt profile could not be decrypted.")
                 setattr(profile, field, PROMPT_DECRYPTION_ERROR)
 
 

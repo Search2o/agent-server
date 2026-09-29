@@ -42,14 +42,25 @@ from search2o.models.apimodels import BaseResponseModel, ErrorResponseModel
 
 
 _DEFAULT_PORT = 9020
+_UI_DIR = Path(__file__).resolve().parent / "ui"
+
+
+def _ui_available() -> bool:
+    return (_UI_DIR / "index.html").is_file()
 
 
 def _startup_banner(host: str, port: int) -> None:
     conf = Config.init_model.agentServer
     base = f"http://{host}:{port}"
     entries = [("Account", Runtime.account_name), ("Serving", base)]
-    if conf.uiPath:
+    if not conf.uiPath:
+        entries.append(("UI", "not served, because the UI path in the agent server configuration is empty"))
+    elif _ui_available():
         entries.append(("UI", f"{base}/{conf.uiPath.strip('/')}/"))
+    else:
+        entries.append(("UI", f"NOT SERVED: the application files are missing ({_UI_DIR / 'index.html'} "
+                              f"was not found). A copy cloned from GitHub does not include them; install "
+                              f"with 'pip install Search2o' to get them."))
     for label, path in (("Swagger", conf.docsUrl), ("ReDoc", conf.redocUrl), ("OpenAPI", conf.openapiUrl)):
         if path:
             entries.append((label, f"{base}{path}"))
@@ -204,11 +215,8 @@ def create_app():
         if conf.routes is None or route in conf.routes:
             fast_api.include_router(router)
 
-    if conf.uiPath:
-        package_dir = Path(__file__).resolve().parent
-        ui_dir = package_dir / "ui"
-        if ui_dir.is_dir():
-            fast_api.mount(f"/{conf.uiPath.strip('/')}", StaticFiles(directory=str(ui_dir), html=True), name="ui")
+    if conf.uiPath and _ui_available():
+        fast_api.mount(f"/{conf.uiPath.strip('/')}", StaticFiles(directory=str(_UI_DIR), html=True), name="ui")
 
     return fast_api
 
