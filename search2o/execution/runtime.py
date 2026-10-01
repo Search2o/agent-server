@@ -274,7 +274,7 @@ class Runtime:
         cls.auth_method = rt.authMethod
         cls.is_builtin_allowed = rt.isBuiltinAllowed
         cls.integration_token_max_age_days = rt.integrationTokenMaxAgeDays
-        cls._remove_stale_agents(rt.agentVersions)
+        cls._remove_stale_agents(rt.agentLastChanged)
         if update_at == 0:
             cls.initial_update_check(rt)
         state = RuntimeState()
@@ -294,15 +294,17 @@ class Runtime:
             if not agent:
                 obj = await RestCall.call_method(request, "getAgentForExecution", {"agentName": name})
                 agent = AgentExec(obj.get("agentName"), obj.get("agentTitle"),
-                                  obj.get("agentVersion"), obj.get("agentDefinition"), obj.get("secretsUsed"))
+                                  obj.get("agentVersion"), obj.get("agentDefinition"),
+                                  obj.get("maxTime"), obj.get("maxCost"), obj.get("secretsUsed"),
+                                  obj.get("lastChanged") or 0)
                 cls._agents[name] = agent
             return agent
 
     @classmethod
-    def _remove_stale_agents(cls, agent_versions: dict[str, int]) -> None:
-        for name, version in agent_versions.items():
+    def _remove_stale_agents(cls, agent_last_changed: dict[str, int]) -> None:
+        for name, last_changed in agent_last_changed.items():
             agent = cls._agents.get(name)
-            if agent and agent.agent_version != version:
+            if agent and agent.last_changed != last_changed:
                 cls._agents.pop(name, None)
 
     @classmethod

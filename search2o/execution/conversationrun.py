@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import math
 from itertools import islice
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -27,11 +26,12 @@ from search2o.execution.hooks import Hooks
 from search2o.execution.llmresponse import LlmResult, LlmTokens
 from search2o.execution.runref import RunRef
 from search2o.execution.runtime import RuntimeState, Runtime
-from search2o.execution.statenodes import Node, FunctionNode, FuncCommandNode, InvokeCommandNode, ParallelCommandNode
+from search2o.execution.savedstate import saved_state_text
+from search2o.execution.statenodes import Node
 from search2o.execution.streamiter import StreamIter
 from search2o.models.apimodels import ErrorResponseModel, ExecAgentResponseModel
 from search2o.models.prompt import LlmResponseModel, ToolCalls
-from search2o.models.schemaobjects import AgentExecResult, ReadOnlyVariable
+from search2o.models.schemaobjects import AgentExecResult
 
 if TYPE_CHECKING:
     from search2o.execution.agent_executor import ExecResponse
@@ -89,6 +89,7 @@ class ConversationRun:
         self.agent_version = agent_exec.agent_version
         self.output = AgentOutput(agentName=agent_exec.agent_name)
         self.callstack: list[Node] = []
+        self.state_text: str | None = None
         self.exec_start_time = 0
 
         self.llm_calls: list[LlmResult] = []
@@ -152,21 +153,36 @@ class ConversationRun:
             await Hooks.call("onAgentStart", lambda: self.hook_args(
                 isNewConversation=not self.conversation_state.runs, startFromAsk=bool(self.prev_state)))
         except Exception as e:
-            return self.response(await self.record(await self.after_hooks(self.hook_failure(e, self.output))))
+            return self.response(await self.record(await self.after_hooks(self.prepare_state(self.hook_failure(e, self.output)))))
 
         ae = AgentExecutor(run=self, agent_exec=self.agent_exec, inputs=self.inputs)
         try:
-            async with asyncio.timeout(self.runtime.validation.maxAgentRuntime):
+            async with asyncio.timeout(self.agent_exec.max_time):
                 er = await ae.exec_agent()
         except HookRefused as e:
             er = self.hook_failure(e, self.output)
         except asyncio.TimeoutError:
             er = ExecResponse(result_code=AgentExecResult.timedOut,
-                              error_message=f"Agent execution timed out after {self.runtime.validation.maxAgentRuntime} "
-                                            f"seconds, as set in the configuration.")
+                              error_message=f"Agent execution timed out after {self.agent_exec.max_time} "
+                                            f"seconds, the run time limit set for this agent.")
 
         self.callstack = ae.callstack
-        return self.response(await self.record(await self.after_hooks(er)))
+        return self.response(await self.record(await self.after_hooks(self.prepare_state(er))))
+
+    def prepare_state(self, er: ExecResponse) -> ExecResponse:
+        from search2o.execution.agent_executor import ExecResponse
+
+        if er.result_code not in (AgentExecResult.success, AgentExecResult.ask):
+            return er
+        self.conversation_state.runs.append(AgentRun(inputs=self.inputs, agentName=self.agent_name,
+                                                     agentVersion=self.agent_version, output=self.output,
+                                                     execAt=Epoch.ms(), callstack=self.callstack))
+        try:
+            self.state_text = saved_state_text(self.conversation_state)
+        except ShowMessage as e:
+            return ExecResponse(result_code=AgentExecResult.errorInAgent, output=self.output,
+                                error_message=e.message(), user_message=e.user_message())
+        return er
 
     async def after_hooks(self, er: ExecResponse) -> ExecResponse:
         if er.result_code in (AgentExecResult.success, AgentExecResult.ask):
@@ -223,8 +239,8 @@ class ConversationRun:
                             (llm_model.inputText, llm_model.inputImage, llm_model.outputText, llm_model.outputImage)) / 1_000_000
         self.llmDuration += llm_duration
         self.llmCost += cost
-        if self.llmCost > self.runtime.validation.maxLlmPrice:
-            raise ShowMessage(f"Agent LLM cost exceeded the total set per run: {self.runtime.validation.maxLlmPrice}",
+        if self.llmCost > self.agent_exec.max_cost:
+            raise ShowMessage(f"Agent LLM cost exceeded the limit set per run for this agent: {self.agent_exec.max_cost}",
                               "This request was stopped because it reached the cost limit set for this agent.")
 
     ENCRYPTED_QUERY_MAX: ClassVar[int] = 200
@@ -264,56 +280,6 @@ class ConversationRun:
                          f"{_MEMORY_AGENTS_MAX} are kept: {', '.join(sorted(set(memories) - set(kept)))} dropped.")
         return kept
 
-    def check_serialization_errors(self) -> str:
-        errors: list[str] = []
-        agent_vars = self.conversation_state.agentVars.get(self.agent_name)
-        namespaces = [(self.conversation_state.conversationVars, ReadOnlyVariable.conv)]
-        if agent_vars is not None:
-            namespaces.insert(0, (agent_vars, ReadOnlyVariable.agent))
-        for (ns, name) in namespaces:
-            for k, v in vars(ns).items():
-                try:
-                    json.dumps(v)
-                except (TypeError, ValueError) as e:
-                    errors.append(f"{name}.{k} is not serializable: {e}")
-        self.check_callstack_errors(self.callstack, errors)
-        return "\n".join(errors)
-
-    def check_callstack_errors(self, nodes: list[Node], errors: list[str]) -> None:
-        for node in nodes:
-            if isinstance(node, FunctionNode):
-                self.check_values_lost(node.localVars, f"Local variable in function {node.name!r}", errors)
-                self.check_values_lost(node.args, f"Argument of function {node.name!r}", errors)
-            elif isinstance(node, FuncCommandNode):
-                self.check_values_lost(node.args, f"Argument to the call of function {node.name!r}", errors)
-            elif isinstance(node, InvokeCommandNode):
-                self.check_values_lost(node.inputs, f"Input to the invoked agent {node.agent_name!r}", errors)
-                self.check_callstack_errors(node.nodes, errors)
-            elif isinstance(node, ParallelCommandNode):
-                self.check_values_lost(node.results, "Result of a function that ran in parallel", errors)
-                for nodes in node.paused.values():
-                    self.check_callstack_errors(nodes, errors)
-
-    @staticmethod
-    def check_values_lost(values: dict[str, Any], what: str, errors: list[str]) -> None:
-        for k, v in values.items():
-            try:
-                json.dumps(v)
-            except (TypeError, ValueError) as e:
-                errors.append(f"{what}, {k!r}, is not serializable and will be lost while the agent waits for the user: {e}")
-
-    def serialize(self) -> str:
-        if self.stream_iter.should_trace or self.runtime.validation.checkSerializationErrors:
-            errors = self.check_serialization_errors()
-            if errors:
-                self.stream_iter.trace(lambda: errors, TraceType.error)
-                MyLogger.warning(f"Agent {self.agent_name!r} in conversation {self.convid}: {errors}")
-        cr = AgentRun(inputs=self.inputs,
-                      agentName=self.agent_name, agentVersion=self.agent_version,
-                      output=self.output, execAt=Epoch.ms(), callstack=self.callstack)
-        self.conversation_state.runs.append(cr)
-        return self.conversation_state.model_dump_json(warnings=False, fallback=lambda _v: {})
-
     async def agent_executed(self, res: ExecResponse):
         duration = Epoch.ms() - self.exec_start_time if self.exec_start_time else 0
         query_en = await Encryptor.encrypt(self.request, self.runtime, self.conversation_title(self.query))
@@ -335,7 +301,9 @@ class ConversationRun:
         await RestCall.call_method(self.request, "agentExecuted", d)
 
     async def save_state(self):
-        state = self.serialize()
+        state = self.state_text
+        if state is None:
+            return
         if self.state_in_hook:
             await Hooks.call("save", lambda: {"convid": self.convid, "state": state, "userEmail": self.user_email,
                                       "agentName": self.agent_name, "isValidation": self.is_validation_run})

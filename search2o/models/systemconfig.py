@@ -385,15 +385,12 @@ class SysVar(BaseModel):
 
 class AgentValidationModel(BaseModel):
     type: Literal[SystemConfigPart.validation] = Field(default=SystemConfigPart.validation, title="Config part", description="Identifies which configuration part this is.")
-    maxAgentRuntime: int = Field(default=600, title="Max agent runtime (seconds)", description="How long an agent may run before it is stopped, in seconds.")
-    maxIterationLoops: int = Field(default=1_000_000, title="Max loop iterations",
+    maxIterationLoops: int = Field(default=10_000, title="Max loop iterations",
                                    description="The most iterations a 'while' or 'for' may run. A loop inside a loop is counted separately.", ge=0)
     yieldLoopsAfter: int = Field(default=1_000, title="Yield loops after", description="How many iterations a loop runs before yielding, so the runtime limit can be checked.")
     dbMaxRows: int = Field(default=10000, title="Max rows from a db call", description="The most rows a single db command may return.")
     agentMaxLength: int = Field(default=20480, title="Max agent length", description="The most characters an agent definition may contain.")
-    maxLlmPrice: float = Field(default=1, title="Max LLM cost per run", description="The agent is stopped once a call takes its spend past this amount, in US dollars.")
     streamHeartbeat: int = Field(default=15, title="Stream heartbeat (seconds)", description="How often a noop is sent on an idle output stream, in seconds, so browsers and proxies do not close it while the agent works.", ge=1)
-    checkSerializationErrors: bool = Field(default=False, title="Check serialization errors", description="Every variable value must be JSON serializable. This is always checked while validating a draft; turning it on also checks it on every run and writes what it finds to the server log.")
 
 class EvalAllowlistModel(BaseModel):
     type: Literal[SystemConfigPart.allowlist] = Field(default=SystemConfigPart.allowlist, title="Config part", description="Identifies which configuration part this is.")
@@ -562,7 +559,7 @@ class AgentRuntime(BaseModel):
     authMethod: AuthMethod = Field(default=AuthMethod.builtin, title="Sign-in method", description="The single sign-on method when the account has one, else builtin; so a client knows what to offer before anyone types.")
     isBuiltinAllowed: bool = Field(default=True, title="Password sign-in allowed", description="Whether a password sign-in is offered as well. False only when single sign-on is the only way in.")
     integrationTokenMaxAgeDays: int | None = Field(default=None, title="Integration token max age (days)", description="The longest an integration token may last on this account, so a client can bound what it asks for. Empty means they do not expire.")
-    agentVersions: dict[str, int] = Field(default_factory=dict, title="Agent versions", description="The current version of each agent, so an agent server can drop the ones it has cached.")
+    agentLastChanged: dict[str, int] = Field(default_factory=dict, title="Agents last changed", description="When each agent that changed since the last refresh was last changed (lastChanged, epoch milliseconds), so an agent server can drop the ones it has cached. It moves on any change to the agent - definition, title, tag, run time or cost limit - not just a new version.")
 
 
 class InitModel(BaseModel):

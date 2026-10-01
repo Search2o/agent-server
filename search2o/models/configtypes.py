@@ -97,6 +97,11 @@ AgentName = Annotated[
 
 SafeName = Annotated[str, Field(pattern=identifierPattern, max_length=safeNameMaxLength)]
 
+AgentMaxTime = Annotated[int, Field(ge=1, title="Max run time (seconds)",
+                                    description="A run of this agent is stopped after this many seconds.")]
+AgentMaxCost = Annotated[float, Field(gt=0, title="Max LLM cost per run (US dollars)",
+                                      description="A run of this agent is stopped once its LLM spend passes this amount.")]
+
 ProfileName = Annotated[str, Field(pattern=identifierPattern, max_length=50)]
 
 MemoryLabel = SafeName

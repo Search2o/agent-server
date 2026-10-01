@@ -24,7 +24,7 @@ from search2o.execution.runref import RunRef
 from search2o.execution.runtime import Runtime, RuntimeState
 from search2o.execution.secretsmanager import SecretsManager
 from search2o.execution.streamiter import StreamIter, StreamDraftReturn
-from search2o.models.configtypes import AgentName, AgentTag
+from search2o.models.configtypes import AgentName, AgentTag, AgentMaxTime, AgentMaxCost
 from search2o.models.apimodels import AgentTitle, BaseResponseModel, \
     DraftResponseModel, EmptyRequestModel, PagedRequestModel, ReportWindow, RequestModel, SearchQuery, \
     ValidateDraftResponseModel
@@ -101,6 +101,9 @@ class AgentResponseModel(BaseResponseModel):
     invokedBy: list[str] = Field(default_factory=list, title="Invoked by",
                                  description="The published agents that invoke this agent. The agent cannot be deleted while this is not empty.")
     descriptor: DescriptorModel = Field(default_factory=DescriptorModel, title="Descriptor", description="What the agent does, which is what a search matches a user's query against. Empty when the agent has no descriptor.")
+    maxTime: int | None = Field(default=None, title="Max run time (seconds)", description="Seconds a run of this agent may take before it is stopped.")
+    maxCost: float | None = Field(default=None, title="Max LLM cost per run (US dollars)", description="US dollars of LLM spend a run of this agent may reach before it is stopped.")
+    lastChanged: int | None = Field(default=None, title="Last changed", description="When anything an agent server uses about this agent last changed - its definition, title, tag or run limits - in epoch milliseconds.", json_schema_extra={"format": "int64"})
     descriptorVersion: int = Field(default=0, title="Descriptor version", description="Version of the descriptor, in epoch milliseconds. Send it back with publishDescriptor. It is 0 when the agent has no descriptor.", json_schema_extra={"format": "int64"})
     lastDescriptorUpdatedByName: str | None = Field(default=None, title="Descriptor last updated by", description="Name of the user who last updated the descriptor.")
     lastDescriptorUpdatedByEmail: str | None = Field(default=None, title="Descriptor last updated by email", description="Email of the user who last updated the descriptor.")
@@ -147,6 +150,8 @@ class SaveDraftNewModel(RequestModel):
     agentDefinition: _AgentDefinition | None = Field(default=None, description="Omit to leave unchanged.")
     validationQuery: str | None = Field(default=None, max_length=2000, description="Omit to leave unchanged.")
     usedProfiles: dict[str, list[str]] | None = Field(default=None, description="The configuration profiles this draft would use, as profile type to names. It is a hint for writing the agent, and can go out of date as the draft is edited. Omit to leave unchanged.")
+    maxTime: AgentMaxTime | None = Field(default=None, description="Seconds a run of this agent may take before it is stopped. Omit to leave unchanged.")
+    maxCost: AgentMaxCost | None = Field(default=None, description="US dollars of LLM spend a run of this agent may reach before it is stopped. Omit to leave unchanged.")
 
 
 @dev_router.post("/saveDraftNew", response_model=BaseResponseModel, summary="Update a draft for a new agent",
@@ -163,6 +168,8 @@ class SaveDraftAgentModel(RequestModel):
     agentDefinition: _AgentDefinition | None = Field(default=None, description="Omit to leave unchanged.")
     validationQuery: str | None = Field(default=None, max_length=2000, description="Omit to leave unchanged.")
     usedProfiles: dict[str, list[str]] | None = Field(default=None, description="The configuration profiles this draft would use, as profile type to names. It is a hint for writing the agent, and can go out of date as the draft is edited. Omit to leave unchanged.")
+    maxTime: AgentMaxTime | None = Field(default=None, description="Seconds a run of this agent may take before it is stopped. Omit to leave unchanged.")
+    maxCost: AgentMaxCost | None = Field(default=None, description="US dollars of LLM spend a run of this agent may reach before it is stopped. Omit to leave unchanged.")
 
 
 @dev_router.post("/saveDraftAgent", response_model=BaseResponseModel, summary="Update a draft of an existing agent",
@@ -298,6 +305,19 @@ class GetPastAgentModel(RequestModel):
 async def getPastAgent(item: GetPastAgentModel, request: Request) -> AgentResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
     return AgentResponseModel.model_validate(ret)
+
+
+class UpdateAgentBudgetModel(RequestModel):
+    agentName: AgentName = Field(..., description="Agent whose run limits are being changed.")
+    maxTime: AgentMaxTime = Field(..., description="Seconds a run of this agent may take before it is stopped.")
+    maxCost: AgentMaxCost = Field(..., description="US dollars of LLM spend a run of this agent may reach before it is stopped.")
+
+
+@dev_router.post("/updateAgentBudget", response_model=BaseResponseModel, summary="Update an agent's run limits",
+                 description="Changes how long a run of a published agent may take and how much LLM spend it may reach. Both are required: an agent is never unlimited. This does not make a new version of the agent.")
+async def updateAgentBudget(item: UpdateAgentBudgetModel, request: Request) -> BaseResponseModel:
+    ret = await RestCall.passthrough(request, item.model_dump())
+    return BaseResponseModel.model_validate(ret)
 
 
 class UpdateTitleModel(RequestModel):
@@ -479,6 +499,8 @@ class DraftValidation(BaseModel):
     validationResults: ValidationResults = Field(default_factory=ValidationResults)
     configUpdatedAt: int = Field(default=0)
     draftAgentDefinition: AgentType | None = Field(default=None)
+    maxTime: int | None = Field(default=None)
+    maxCost: float | None = Field(default=None)
     convid: str
 
 
@@ -517,6 +539,7 @@ async def _validate_draft_internal(item: ValidateDraftModel, request: Request, s
             if draft.validationQuery:
                 agent_exec = AgentExec.create_for_draft(draft.draftName, draft.agentTitle,
                                                         validate_response.draftAgentDefinition,
+                                                        validate_response.maxTime, validate_response.maxCost,
                                                         [r.detail for r in results if r.vtype == ValidationResultType.secret])
                 if item.followup:
                     convid = validate_response.convid

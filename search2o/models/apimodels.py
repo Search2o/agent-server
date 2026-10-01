@@ -88,6 +88,8 @@ class DraftResponseModel(BaseResponseModel):
     draftExecutionValidated: bool = Field(default=False, description="Whether the draft ran successfully against its validation query. Both this and draftCompilationValidated must be true before the draft can be published.", title="Execution validated")
     isNewDraft: bool = Field(default=False, description="Whether this draft is for a new agent rather than an existing one.", title="New draft")
     usedProfiles: dict[str, list[str]] = Field(default_factory=dict, description="The configuration profiles this draft would use, as profile type to names. It is a hint for writing the agent, and can go out of date as the draft is edited.", title="Used profiles")
+    maxTime: int | None = Field(default=None, title="Max run time (seconds)", description="Seconds a run of this draft's agent may take before it is stopped.")
+    maxCost: float | None = Field(default=None, title="Max LLM cost per run (US dollars)", description="US dollars of LLM spend a run of this draft's agent may reach before it is stopped.")
 
 
 AskBlocks = dict[str, dict[str, Any] | AskInputsModel]

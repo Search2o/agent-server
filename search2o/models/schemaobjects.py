@@ -235,6 +235,7 @@ class AuditEntryType(StrEnum):
     tagUpdated = "tagUpdated"
     failedSignIns = "failedSignIns"
     titleUpdated = "titleUpdated"
+    budgetUpdated = "budgetUpdated"
     unknownPasswordReset = "unknownPasswordReset"
     agentServer = "agentServer"
     servers = auto()

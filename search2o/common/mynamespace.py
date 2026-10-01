@@ -6,7 +6,7 @@
 from types import SimpleNamespace
 from typing import Annotated, Any, ClassVar
 
-from pydantic import JsonValue, PlainSerializer, PlainValidator, TypeAdapter, ValidationError
+from pydantic import JsonValue, PlainSerializer, PlainValidator, TypeAdapter
 
 from search2o.models.schemaobjects import ReadOnlyVariable
 
@@ -40,7 +40,6 @@ class CommandNamespace(MyNamespace):
 
 
 _json_object_adapter = TypeAdapter(dict[str, JsonValue])
-_json_value_adapter = TypeAdapter(JsonValue)
 
 
 def _validate_agent_namespace(value: Any) -> AgentNamespace:
@@ -61,14 +60,8 @@ def _validate_conv_namespace(value: Any) -> ConvNamespace:
 
 def _serialize_namespace(
         value: MyNamespace,
-) -> dict[str, JsonValue]:
-    out: dict[str, JsonValue] = {}
-    for k, v in vars(value).items():
-        try:
-            out[k] = _json_value_adapter.validate_python(v)
-        except ValidationError:
-            pass
-    return out
+) -> dict[str, Any]:
+    return dict(vars(value))
 
 
 AgentNamespaceField = Annotated[
@@ -79,7 +72,7 @@ AgentNamespaceField = Annotated[
     ),
     PlainSerializer(
         _serialize_namespace,
-        return_type=dict[str, JsonValue],
+        return_type=dict[str, Any],
     ),
 ]
 
@@ -92,7 +85,7 @@ ConvNamespaceField = Annotated[
     ),
     PlainSerializer(
         _serialize_namespace,
-        return_type=dict[str, JsonValue],
+        return_type=dict[str, Any],
     ),
 ]
 
