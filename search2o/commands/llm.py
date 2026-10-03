@@ -33,7 +33,7 @@ from search2o.llm.llmcontext import LlmContext
 from search2o.mcpclient.mcp import Mcp
 from search2o.models.agentexecmodel import CommandExecModel
 from search2o.models.prompt import LlmRequestModel, AgentFunctionModel, AssistantResponse, ToolCalls, ToolResults, ToolResult, \
-    ContentOutput, LlmResponseModel
+    ContentOutput, LlmResponseModel, ToolChoiceModel
 from search2o.models.schemaobjects import CommandName
 from search2o.models.systemconfig import LlmModel
 
@@ -173,6 +173,8 @@ class LlmCommand(CommandExec):
             context = self.get_context(executor, llm_name)
             model_config = context.llm
             await self.set_tools_and_tasks(function, command, executor, llmreq, model_config, command_ns, path)
+            if output_format == AgentWords.structured and (llmreq.agentFunctions or llmreq.mcpTools):
+                llmreq.toolChoice = ToolChoiceModel(type="any")
             await self.set_dynamic_config(function, command, executor, llmreq, model_config, llm_name, command_ns, path)
 
             tool_call_count = node.toolCallCount if node else 0
