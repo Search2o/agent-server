@@ -33,7 +33,7 @@ from search2o.llm.llmcontext import LlmContext
 from search2o.mcpclient.mcp import Mcp
 from search2o.models.agentexecmodel import CommandExecModel
 from search2o.models.prompt import LlmRequestModel, AgentFunctionModel, AssistantResponse, ToolCalls, ToolResults, ToolResult, \
-    ContentOutput, LlmResponseModel, ToolChoiceModel
+    ContentOutput, LlmResponseModel, ToolChoiceModel, UserEntry
 from search2o.models.schemaobjects import CommandName
 from search2o.models.systemconfig import LlmModel
 
@@ -169,14 +169,6 @@ class LlmCommand(CommandExec):
         with PromptHelper(executor.prompts, prompt_name) as prompt_helper:
             prompt = prompt_helper.prompt
 
-            llmreq: LlmRequestModel = LlmRequestModel(prompt=prompt)
-            context = self.get_context(executor, llm_name)
-            model_config = context.llm
-            await self.set_tools_and_tasks(function, command, executor, llmreq, model_config, command_ns, path)
-            if output_format == AgentWords.structured and (llmreq.agentFunctions or llmreq.mcpTools):
-                llmreq.toolChoice = ToolChoiceModel(type="any")
-            await self.set_dynamic_config(function, command, executor, llmreq, model_config, llm_name, command_ns, path)
-
             tool_call_count = node.toolCallCount if node else 0
             got_asst_response = False
             if node:
@@ -186,6 +178,14 @@ class LlmCommand(CommandExec):
             else:
                 nof_prompt_elements = len(prompt.elements)
             try:
+                llmreq: LlmRequestModel = LlmRequestModel(prompt=prompt)
+                context = self.get_context(executor, llm_name)
+                model_config = context.llm
+                await self.set_tools_and_tasks(function, command, executor, llmreq, model_config, command_ns, path)
+                if output_format == AgentWords.structured and (llmreq.agentFunctions or llmreq.mcpTools):
+                    llmreq.toolChoice = ToolChoiceModel(type="any")
+                await self.set_dynamic_config(function, command, executor, llmreq, model_config, llm_name, command_ns, path)
+
                 while tool_call_count < max_tool_call_loops:
                     if node:
                         asst = node.elements[-1]
@@ -286,7 +286,9 @@ class LlmCommand(CommandExec):
 
                 raise ShowMessage(f"Max number of tool calls ({max_tool_call_loops}) exceeded.")
             finally:
-                if not got_asst_response and len(prompt.elements) > nof_prompt_elements:
+                if not got_asst_response:
+                    while nof_prompt_elements and isinstance(prompt.elements[nof_prompt_elements - 1], UserEntry):
+                        nof_prompt_elements -= 1
                     del prompt.elements[nof_prompt_elements:]
 
     @classmethod
