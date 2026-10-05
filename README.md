@@ -25,15 +25,17 @@ Running this server requires a license key. Get one at **[Getting started](https
 
 ### 3. Start the server
 
-Start the server with your license key and an API key from OpenAI, Anthropic, or Google:
+Start the server with your license key and, for a hosted LLM, an API key. Local models served by Ollama or vLLM need no API key:
 
 | Vendor | Command |
 |---|---|
 | **OpenAI** | `SEARCH2O_LICENSE_KEY=your-license-key OPENAI_API_KEY=your-api-key search2o` |
 | **Anthropic** | `SEARCH2O_LICENSE_KEY=your-license-key ANTHROPIC_API_KEY=your-api-key search2o` |
 | **Google** | `SEARCH2O_LICENSE_KEY=your-license-key GEMINI_API_KEY=your-api-key search2o` |
+| **Ollama** | `SEARCH2O_LICENSE_KEY=your-license-key search2o` |
+| **vLLM** | `SEARCH2O_LICENSE_KEY=your-license-key search2o` |
 
-If you use other LLMs, see [Connecting to other LLMs](https://search2o.com/docs/llm/llm-adapters.html).
+For others, see [Connecting to other LLMs](https://search2o.com/docs/llm/llm-adapters.html).
 
 ### 4. Open the GUI
 

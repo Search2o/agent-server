@@ -9,7 +9,9 @@ from search2o.common.mylogger import MyLogger
 from search2o.llm.anthropicadapter import AnthropicAdapter
 from search2o.llm.geminiadapter import GeminiAdapter
 from search2o.llm.llmadapter import LlmAdapter
+from search2o.llm.ollamaadapter import OllamaAdapter
 from search2o.llm.openaiadapter import OpenaiAdapter
+from search2o.llm.vllmadapter import VllmAdapter
 from search2o.models.systemconfig import LlmModel
 
 
@@ -26,7 +28,7 @@ class AllLlmContexts:
 
         adapters: dict[str, LlmAdapter] = {}
 
-        for obj in (AnthropicAdapter(), GeminiAdapter(), OpenaiAdapter()):
+        for obj in (AnthropicAdapter(), GeminiAdapter(), OpenaiAdapter(), OllamaAdapter(), VllmAdapter()):
             adapters[obj.name()] = obj
 
         for obj in custom_adapters:

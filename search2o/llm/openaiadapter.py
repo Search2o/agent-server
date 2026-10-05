@@ -19,7 +19,7 @@ class OpenaiAdapter(BaseLlmAdapter):
         return "openai"
 
     def description(self) -> str:
-        return "Adapter for OpenAI ChatGPT responses API or any vendor that is compatible with it"
+        return "Adapter for OpenAI responses API or any vendor that is compatible with it"
 
     def set_model(self, req: LlmRequestModel, params: dict[str, Any]):
         params["model"] = req.model
@@ -107,7 +107,7 @@ class OpenaiAdapter(BaseLlmAdapter):
         text_parts: list = []
         for part in me.response.parts:
             if isinstance(part, TextPart):
-                text_parts.append({"type": "output_text", "text": part.text})
+                text_parts.append(part.text)
             elif isinstance(part, ImagePart):
                 if part.reasoning_openai:
                     messages.append(part.reasoning_openai)
@@ -116,7 +116,7 @@ class OpenaiAdapter(BaseLlmAdapter):
                     "id": part.id_openai,
                 })
         if text_parts:
-            messages.append({"role": "assistant", "content": text_parts})
+            messages.append({"role": "assistant", "content": "\n".join(text_parts)})
 
 
     def set_messages_tool_results(self, req: LlmRequestModel, params: dict[str, Any], me: PromptElement, messages: list):

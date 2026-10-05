@@ -10,7 +10,7 @@ from typing import Literal, Annotated, TypeAlias, Self
 
 from pydantic import BaseModel, Field, JsonValue, AfterValidator, model_validator
 
-from .configtypes import SystemConfigPart, AgentConfigPart, AuthMethod, ProfileName, TagFilter, ExprString, DynamicDict
+from .configtypes import SystemConfigPart, AgentConfigPart, AuthMethod, ProfileName, ExprString, DynamicDict
 from .schemaobjects import ServiceLevel
 
 ProfileDoc = Annotated[str, Field(default="", title="Documentation", description="Documentation of what this profile is used for. This field is optional. It can be useful in generating agent definitions.", max_length=500)]
@@ -201,7 +201,6 @@ class ModelDetails(BaseModel):
 
 class LlmModel(NamedBaseModel, SecretsUsedModel):
     type: Literal[AgentConfigPart.llm] = Field(default=AgentConfigPart.llm, title="Config part", description="Identifies which configuration part this is.")
-    vendor: str = Field(default="openai", title="Vendor", description="The LLM vendor. Reports are organized under this name.")
     adapter: str = Field(default="openai", title="Adapter", description="The adapter class that connects to this LLM. It must implement the LlmAdapter interface and be on the allowlist.")
     url: ExprString = Field(default="https://api.openai.com", title="Server URL", description="The URL of the LLM server.")
     headers: dict[str, ExprString] = Field(default_factory=dict, title="HTTP headers", description="Headers added to the request. Values are dynamic strings, as in agents.")
@@ -459,24 +458,6 @@ class QueryLogging(StrEnum):
     failureOnly = "failureOnly"
     none = auto()
 
-class SearchBehavior(StrEnum):
-    executeTopMatch = "executeTopMatch" # Always execute the top match (Default)
-    executeOnlyMatch = "executeOnlyMatch" # When there is a single match, execute automatically. If there are more, show them to the user.
-    showResults = "showResults"  # Even when there is a single match, show it to the user. Do not run automatically.
-
-class FollowupBehavior(StrEnum):
-    executeTopMatch = "executeTopMatch" # Always execute the top match. If there are no matches, execute the previous (Default)
-    executeOnlyMatch = "executeOnlyMatch"  # When there is a single match, execute automatically. If there are more, show them to the user. Add the previous agent to the end, if it doesn't exist in the search results.
-    showResults = "showResults" # Even when there is a single match, show it to the user. Do not run automatically. Also, append the previous agent to the list at the end, if it does not already exist in the search results.
-    executePrevious = "executePrevious"  # Always execute the same agent in a conversation
-
-class SearchOptionsModel(BaseModel):
-    type: Literal[SystemConfigPart.search] = Field(default=SystemConfigPart.search, title="Config part", description="Identifies which configuration part this is.")
-    tag: TagFilter = Field(default="", title="Filter tag",
-                           description="Only agents carrying this tag are matched. Default is an empty string, which matches all tags.")
-    searchBehavior: SearchBehavior = Field(default=SearchBehavior.executeTopMatch, title="Search behavior", description="Decides what happens when the user hits enter on a new search.")
-    followupBehavior: FollowupBehavior = Field(default=FollowupBehavior.executeTopMatch, title="Followup behavior", description="Decides what happens when the user hits enter on a followup.")
-
 class EncryptionSource(StrEnum):
     client = auto()
     cloud = auto()
@@ -532,7 +513,6 @@ SystemConfigModelUnion: TypeAlias = Annotated[
         | AgentValidationModel
         | EvalAllowlistModel
         | SysVar
-        | SearchOptionsModel
         | ApiConnectionPoolsModel
         | HooksModel,
         Field(discriminator="type"),

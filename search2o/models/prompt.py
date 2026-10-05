@@ -108,7 +108,6 @@ class ToolChoiceModel(BaseModel):
 
 
 class LlmRequestModel(BaseModel):
-    vendor: str = Field(default="", description="The vendor named in the LLM profile.", title="Vendor")
     model: str = Field(default="", description="The model this call uses.", title="Model")
 
     url: str = Field(default="", title="Server URL", description="The LLM server URL, after the profile's expressions are evaluated.")

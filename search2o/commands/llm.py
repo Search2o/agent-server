@@ -128,7 +128,6 @@ class LlmCommand(CommandExec):
     @staticmethod
     async def set_dynamic_config(task: FunctionFrame, command: CommandExecModel, executor: AgentExecutor, llmreq: LlmRequestModel,
                                  model_config: LlmModel, llm_name: str, command_ns: SimpleNamespace, path: str):
-        llmreq.vendor = model_config.vendor
         llmreq.model = model_config.model
         llmreq.retries = model_config.retries
         llmreq.maxTokens = model_config.maxTokens
@@ -329,7 +328,7 @@ class LlmCommand(CommandExec):
 
         failure_reason = llm_response.failure_reason if llm_response else "No response received."
         raise LlmError(
-            f"LLM call to {req.vendor}/{req.model} failed. "
+            f"LLM call to {context.llm.name} ({req.model}) failed. "
             f"LLM gave this failure reason: {failure_reason}"
         )
 
@@ -350,12 +349,12 @@ class LlmCommand(CommandExec):
 
         except TimeoutError:
             raise LlmError(
-                f"LLM call to {req.vendor}/{req.model} failed. "
+                f"LLM call to {context.llm.name} ({req.model}) failed. "
                 f"Timed out after {timeout} seconds."
             )
 
         except Exception as ex:
-            message = f"LLM call to {req.vendor}/{req.model} failed. Transport error - {error_message(ex)}"
+            message = f"LLM call to {context.llm.name} ({req.model}) failed. Transport error - {error_message(ex)}"
             MyLogger.error(message)
             from search2o.common.rest_call import RestCall
             RestCall.report_error_once("An LLM call could not connect.")
@@ -371,7 +370,7 @@ class LlmCommand(CommandExec):
     ) -> LlmResponseModel:
         if response.status_code != 200:
             raise LlmError(
-                f"LLM call to {req.vendor}/{req.model} failed. "
+                f"LLM call to {context.llm.name} ({req.model}) failed. "
                 f"Error message from the LLM: {cls._read_llm_error(context, req, response)}"
             )
 
@@ -381,7 +380,7 @@ class LlmCommand(CommandExec):
             raise  # preserve the adapter's specific failure reason
         except Exception:
             raise LlmError(
-                f"LLM call to {req.vendor}/{req.model} failed. "
+                f"LLM call to {context.llm.name} ({req.model}) failed. "
                 f"Unexpected message from the LLM: {response.text}"
             )
 

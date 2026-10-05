@@ -58,7 +58,6 @@ class SystemConfigPart(StrEnum):
     validation = auto()
     allowlist = auto()
     sysvar = auto()
-    search = auto()
 
     apiConnectionPools = "apiConnectionPools"
 

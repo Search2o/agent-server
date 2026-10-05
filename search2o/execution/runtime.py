@@ -27,7 +27,7 @@ from search2o.execution.secretsmanager import SecretCache
 from search2o.llm.llmcontext import AllLlmContexts
 from search2o.models.configtypes import AuthMethod, SystemConfigPart, AgentConfigPart
 from search2o.models.schemaobjects import ServiceLevel
-from search2o.models.systemconfig import SearchOptionsModel, AgentValidationModel, ApiServerModel, DbConnectionModel, \
+from search2o.models.systemconfig import AgentValidationModel, ApiServerModel, DbConnectionModel, \
     McpServerModel, PromptProfileModel, AgentRuntime, \
     LlmModel, NamedBaseModel, AgentSecretsModel, EncryptionModel, \
     AgentConfigModelUnion, ApiConnectionPoolsModel, SysVar
@@ -46,7 +46,6 @@ class RuntimeState:
         self.retired: list[Closable] = []
 
         self.config_update_at: int
-        self.search_options: SearchOptionsModel
         self.validation: AgentValidationModel
         self.secrets_model: AgentSecretsModel
         self.secret_cache: SecretCache = {}
@@ -68,7 +67,6 @@ class RuntimeState:
     async def update(self, request: Request, ar: AgentRuntime, prev: RuntimeState):
         self.config_update_at = ar.updated
 
-        self.search_options = self._d2m(ar, SystemConfigPart.search) if SystemConfigPart.search in ar.updatedSystemConfigs else prev.search_options
         self.validation = self._d2m(ar, SystemConfigPart.validation) if SystemConfigPart.validation in ar.updatedSystemConfigs else prev.validation
         self.encryption_model = self._d2m(ar, SystemConfigPart.encryption) if SystemConfigPart.encryption in ar.updatedSystemConfigs else prev.encryption_model
         self.sysvar = self._d2m(ar, SystemConfigPart.sysvar) if SystemConfigPart.sysvar in ar.updatedSystemConfigs else prev.sysvar
@@ -315,7 +313,7 @@ class Runtime:
     @classmethod
     def initial_update_check(cls, ar: AgentRuntime):
         error = False
-        for p in (SystemConfigPart.allowlist, SystemConfigPart.sysvar, SystemConfigPart.search, SystemConfigPart.validation, SystemConfigPart.apiConnectionPools):
+        for p in (SystemConfigPart.allowlist, SystemConfigPart.sysvar, SystemConfigPart.validation, SystemConfigPart.apiConnectionPools):
             if p not in ar.updatedSystemConfigs:
                 error = True
         for p in AgentConfigPart:

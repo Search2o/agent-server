@@ -22,7 +22,6 @@ from search2o.models.apimodels import BaseResponseModel, ErrorResponseModel, Exe
 from search2o.common.exceptions import error_message
 from search2o.common.mylogger import MyLogger
 from search2o.models.configtypes import AgentName, TagFilter
-from search2o.models.systemconfig import SearchBehavior, FollowupBehavior
 
 exec_router = APIRouter(prefix="/api/exec", tags=["exec"])
 
@@ -41,19 +40,14 @@ class SearchModel(RequestModel):
 class SearchResponseModel(BaseResponseModel): # Sent straight to the UI
     searchResults: list[AgentTitleModel] = Field(default_factory=list,
                                                  description="The agents that matched the query, best match first.")
-    searchBehavior: SearchBehavior
-    followupBehavior: FollowupBehavior
 
 @exec_router.post("/search", response_model=SearchResponseModel, summary="Search for agents",
                   description="Finds the agents that best match the search query.")
 async def search(item: SearchModel, request: Request) -> SearchResponseModel:
-    so = Runtime.current().search_options
     ret = await RestCall.passthrough_method(request, "search", {"query": cloud_search_query(item.query),
-                                                                "tag": item.tag if item.tag is not None else so.tag})
+                                                                "tag": item.tag if item.tag is not None else ""})
     return SearchResponseModel(success=ret.get("success", True),
-                               searchResults=ret.get("searchResults") or [],
-                               searchBehavior=so.searchBehavior,
-                               followupBehavior=so.followupBehavior)
+                               searchResults=ret.get("searchResults") or [])
 
 
 async def stop_when_client_leaves(stream_iter: StreamIter, run: asyncio.Task, run_ref: RunRef):
