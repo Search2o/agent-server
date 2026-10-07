@@ -30,6 +30,7 @@ from search2o.execution.llmresponse import LlmResponse
 from search2o.execution.prompts import PromptHelper
 from search2o.execution.statenodes import LlmCommandNode
 from search2o.llm.llmcontext import LlmContext
+from search2o.llm.schemabuilder import SchemaBuilder
 from search2o.mcpclient.mcp import Mcp
 from search2o.models.agentexecmodel import CommandExecModel
 from search2o.models.prompt import LlmRequestModel, AgentFunctionModel, AssistantResponse, ToolCalls, ToolResults, ToolResult, \
@@ -312,6 +313,11 @@ class LlmCommand(CommandExec):
             try:
                 response = await cls._send_llm_request(context, client, req, timeout)
                 llm_response = cls._read_llm_response(context, req, response)
+                problem = cls._structured_args_problem(req, llm_response)
+                if problem:
+                    llm_response.did_succeed = False
+                    llm_response.should_retry = True
+                    llm_response.failure_reason = problem
 
                 if llm_response.did_succeed:
                     return llm_response
@@ -331,6 +337,25 @@ class LlmCommand(CommandExec):
             f"LLM call to {context.llm.name} ({req.model}) failed. "
             f"LLM gave this failure reason: {failure_reason}"
         )
+
+
+    @staticmethod
+    def _structured_args_problem(req: LlmRequestModel, llm_response: LlmResponseModel) -> str:
+        asst = llm_response.assistant
+        if not req.toolChoice or req.toolChoice.type not in ("any", "tool") or not asst or not isinstance(asst.response, ToolCalls):
+            return ""
+        schemas: dict[str, Any] = {tool.name: tool.parameters for tool in req.mcpTools}
+        schemas.update({task.name: SchemaBuilder.build(task.name, task.parameters) for task in req.agentFunctions})
+        for call in asst.response.tools:
+            schema = schemas.get(call.name)
+            args = ToolCallMethods.get_tool_args(call.args)
+            if not isinstance(schema, dict) or not isinstance(schema.get("required"), list):
+                continue
+            missing = [arg for arg in schema["required"] if not isinstance(args, dict) or arg not in args]
+            if missing:
+                _, name = ToolCallMethods.retrieve_name(call.name)
+                return f"Required arguments missing in the call to {name}: {', '.join(map(str, missing))}"
+        return ""
 
 
     @classmethod

@@ -11,44 +11,55 @@ This repository contains the **Search2o Agent Server**: a stateless, asynchronou
 
 ## Getting started
 
-### 1. Install
+### 1. Create your account
+
+Create your account at **[Getting started](https://search2o.com/gettingstarted.html)**. Your license key appears on that page when the account is created. No email is sent at this step.
+
+### 2. Install the agent server
+
+Install the agent server with the bundled GUI:
 
 ```bash
 pip install search2o
 ```
 
-The `pip` package includes the GUI. Cloning the GitHub repository does not include it.
+This GitHub repository holds the agent server without the GUI; the GUI will be published as a separate GitHub project.
 
-### 2. Get a license key
+### 3. Run the server
 
-Running this server requires a license key. Get one at **[Getting started](https://search2o.com/gettingstarted.html)**.
+macOS / Linux:
 
-### 3. Start the server
+```bash
+SEARCH2O_LICENSE_KEY=your-license-key search2o
+```
 
-Start the server with your license key and, for a hosted LLM, an API key. Local models served by Ollama or vLLM need no API key:
+Windows PowerShell:
 
-| Vendor | Command |
-|---|---|
-| **OpenAI** | `SEARCH2O_LICENSE_KEY=your-license-key OPENAI_API_KEY=your-api-key search2o` |
-| **Anthropic** | `SEARCH2O_LICENSE_KEY=your-license-key ANTHROPIC_API_KEY=your-api-key search2o` |
-| **Google** | `SEARCH2O_LICENSE_KEY=your-license-key GEMINI_API_KEY=your-api-key search2o` |
-| **Ollama** | `SEARCH2O_LICENSE_KEY=your-license-key search2o` |
-| **vLLM** | `SEARCH2O_LICENSE_KEY=your-license-key search2o` |
+```powershell
+$env:SEARCH2O_LICENSE_KEY="your-license-key"
+search2o
+```
 
-For others, see [Connecting to other LLMs](https://search2o.com/docs/llm/llm-adapters.html).
+Self-hosted models using Ollama, vLLM or SGLang need no vendor API key. For OpenAI, Anthropic or Gemini, before starting the server, also set one or more of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`. For other LLMs, see [Connecting to other LLMs](https://search2o.com/docs/llm/llm-adapters.html).
 
-### 4. Open the GUI
+### 4. Set up your account
 
-1. Open `http://127.0.0.1:9020/ui`.
-2. Click **New user / Forgot password** on the sign-in dialog.
-3. Enter the email you used to create your account at **[Getting started](https://search2o.com/gettingstarted.html)**. You will receive an email with a code.
-4. Enter the code, choose a password, and sign in.
+Open `http://127.0.0.1:9020/ui` and click **New user / Forgot password** on the sign-in dialog. Enter the same email you used to create your account in step 1. A code is emailed to that address and no other. Enter the code, choose a password, and sign in.
 
-The same server serves its OpenAPI schema at `/openapi.json`, Swagger UI at `/docs`, and ReDoc at `/redoc`.
+The server also serves its OpenAPI schema at `/openapi.json`, Swagger UI at `/docs` and ReDoc at `/redoc`.
 
-You can build, index, and test agents locally. The Agent Server is stateless, so you can later run it in a shared environment without moving your agents or configuration.
+### 5. Build your first agents
 
-Full documentation is available at [search2o.com/docs](https://search2o.com/docs/index.html).
+LLMs are called from an agent using an [LLM profile](https://search2o.com/docs/profiles/llm-profiles.html). You can use an existing profile or create a new one.
+
+1. Open **Agents → Drafts** and create a draft. Select your LLM profile, then tell **Draft with AI** what you want.
+2. Build two or three task-specific agents. Each agent would typically use one or two of your enterprise systems and handle a specific use case.
+3. Validate and publish them. Then add plain-English descriptions so search can find them.
+4. Type a question in the search box: the agent matches, runs and answers.
+
+The same agents work in Claude Code through the [search2o-skill](https://github.com/Search2o/search2o-skill).
+
+If you have questions, click the docs icon at the top of the UI, or see the full documentation at [search2o.com/docs](https://search2o.com/docs/index.html). We would love to hear how setting up and running your first few agents went: email [info@search2o.com](mailto:info@search2o.com), or send a message from the message icon in the GUI.
 
 ## License
 

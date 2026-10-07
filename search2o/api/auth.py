@@ -154,6 +154,19 @@ async def getPasswordHelp() -> PasswordHelpResponseModel:
     return PasswordHelpResponseModel(passwordHelp=Runtime.password_help, success=True)
 
 
+class UiConfigResponseModel(BaseResponseModel):
+    uiConfig: dict[str, JsonValue] = Field(default_factory=dict, title="UI configuration", description="The UI configuration set for this agent server.")
+
+
+@auth_router.post("/getUiConfig", response_model=UiConfigResponseModel,
+                  summary="Gets the UI configuration",
+                  description="Gets the free form UI configuration set for this agent server. Anyone can call this.",
+                  openapi_extra={"security": []})
+async def getUiConfig() -> UiConfigResponseModel:
+    from search2o.config.config import Config
+    return UiConfigResponseModel(uiConfig=Config.init_model.agentServer.uiConfig, success=True)
+
+
 class GetDocsWebModel(RequestModel):
     dtype: DocsWebType = Field(..., title="Document type", description="Which dynamic document to fetch.")
 

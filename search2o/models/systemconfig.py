@@ -441,6 +441,7 @@ class AgentServerModel(BaseModel):
     openapiUrl: str | None = Field(default="/openapi.json", title="OpenAPI URL", description="Where the OpenAPI schema is served.")
     logs: dict[str, JsonValue] = Field(default_factory=dict, title="Logging", description="Logging configuration for the agent server.")
     cloudPool: ConnectionPoolModel = Field(default_factory=ConnectionPoolModel, title="Cloud connection pool", description="How this agent server connects to Search2o Cloud. It carries connection settings only: it is deliberately not one of the API connection pools, and it has no certificate fields, so nothing configured for an agent can change how this server reaches Search2o Cloud. A server behind a proxy that re-signs TLS trusts that proxy through the SSL_CERT_FILE environment variable, which is where a machine-wide trust setting belongs. Changing any of this needs an agent server restart.")
+    uiConfig: dict[str, JsonValue] = Field(default_factory=dict, title="UI configuration", description="A free form JSON configuration that is sent to the UI from the getUiConfig call.")
 
 
 class AgentServerModels(BaseModel):
