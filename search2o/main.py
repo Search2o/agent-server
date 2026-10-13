@@ -49,6 +49,14 @@ def _ui_available() -> bool:
     return (_UI_DIR / "index.html").is_file()
 
 
+class _UiFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if not path.startswith("assets/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def _startup_banner(host: str, port: int) -> None:
     conf = Config.init_model.agentServer
     base = f"http://{host}:{port}"
@@ -216,7 +224,7 @@ def create_app():
             fast_api.include_router(router)
 
     if conf.uiPath and _ui_available():
-        fast_api.mount(f"/{conf.uiPath.strip('/')}", StaticFiles(directory=str(_UI_DIR), html=True), name="ui")
+        fast_api.mount(f"/{conf.uiPath.strip('/')}", _UiFiles(directory=str(_UI_DIR), html=True), name="ui")
 
     return fast_api
 
