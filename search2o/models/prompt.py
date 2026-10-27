@@ -9,7 +9,6 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, JsonValue
 
-from search2o.models.configtypes import ExprString
 from search2o.models.schemaobjects import AgentFunctionModel
 
 
@@ -52,6 +51,7 @@ class ToolCall(BaseModel):
 class ToolCalls(BaseModel):
     assistantResponseType: Literal["tool_call"] = Field(default="tool_call", title="Response type", description="Identifies this response as tool calls rather than content.")
     tools: list[ToolCall] = Field(default_factory=list, title="Tool calls", description="The calls the LLM asked for in this round.")
+    additionalFields: dict[str, JsonValue] | None = Field(default=None, title="Additional fields", description="Vendor fields for the whole round, carried through unchanged so they can be sent back on the next call, such as Anthropic's thinking blocks.")
 
 
 class AssistantResponse(BaseModel):
@@ -118,7 +118,7 @@ class LlmRequestModel(BaseModel):
 
     retries: int = Field(
         default=0,
-        description="How many times to retry. A request is retried only when the adapter sets should_retry - Gemini needs this, as some tool calls succeed on the second attempt.",
+        description="How many times to retry. A request is retried when the adapter sets should_retry (Gemini needs this, as some tool calls succeed on the second attempt), and after a timeout, a transport error, a 429 or a 5xx, with a short wait. Other errors are not retried.",
         ge=0, title="Retries")
     maxTokens: int = Field(default=5000, title="Max tokens", description="The token ceiling for this call.")
 

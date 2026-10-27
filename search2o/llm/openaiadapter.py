@@ -105,10 +105,15 @@ class OpenaiAdapter(BaseLlmAdapter):
 
     def set_messages_assistant_response_content_output(self, req: LlmRequestModel, params: dict[str, Any], me: PromptElement, messages: list):
         text_parts: list = []
+        images: list = []
         for part in me.response.parts:
             if isinstance(part, TextPart):
                 text_parts.append(part.text)
             elif isinstance(part, ImagePart):
+                if not part.id_openai:
+                    images.append({"type": "input_image",
+                                   "image_url": f"data:{part.mimeType};base64,{part.contentBase64}"})
+                    continue
                 if part.reasoning_openai:
                     messages.append(part.reasoning_openai)
                 messages.append({
@@ -117,6 +122,8 @@ class OpenaiAdapter(BaseLlmAdapter):
                 })
         if text_parts:
             messages.append({"role": "assistant", "content": "\n".join(text_parts)})
+        if images:
+            messages.append({"role": "user", "content": images})
 
 
     def set_messages_tool_results(self, req: LlmRequestModel, params: dict[str, Any], me: PromptElement, messages: list):
@@ -157,10 +164,12 @@ class OpenaiAdapter(BaseLlmAdapter):
         input_details = usage.get("input_tokens_details")
         if isinstance(input_details, dict):
             llm_response.inputImageTokens = input_details.get("image_tokens") or 0
+            llm_response.inputTextTokens = max(0, llm_response.inputTextTokens - llm_response.inputImageTokens)
 
         output_details = usage.get("output_tokens_details")
         if isinstance(output_details, dict):
             llm_response.outputImageTokens = output_details.get("image_tokens") or 0
+            llm_response.outputTextTokens = max(0, llm_response.outputTextTokens - llm_response.outputImageTokens)
 
 
     def set_assistant_vendor(self, llm_response: LlmResponseModel, tool_calls: ToolCalls, content: ContentOutput, response: dict[str, JsonValue]):

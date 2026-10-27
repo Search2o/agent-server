@@ -12,18 +12,17 @@ from pydantic import BaseModel, EmailStr, Field
 
 from search2o.common.rest_call import RestCall
 from search2o.common.exceptions import ShowMessage, error_message
-from search2o.common.mylogger import MyLogger
 from search2o.common.sensitivestring import SensitiveString
 from search2o.execution.allowlist import Allowlist
 from search2o.execution.encryptor import Encryptor
 from search2o.execution.hooks import Hooks
-from search2o.execution.runtime import Runtime, PROMPT_DECRYPTION_ERROR
+from search2o.execution.runtime import Runtime
 from search2o.models.apimodels import ErrorResponseModel, BaseResponseModel, EmptyRequestModel, PagedRequestModel, RequestModel
 from search2o.models.configtypes import SystemConfigPart, AgentConfigPart, ServiceAccountName
 from search2o.models.schemaobjects import UserRole, UserRoleFacet
 from search2o.models.systemconfig import SecretSource, AgentSecretsModel, \
     EncryptionModel, EncryptionSource, SystemConfigModelUnion, AgentConfigModelUnion, \
-    ApiConnectionPoolsModel, CompileOptions, EvalAllowlistModel, PromptProfileModel
+    ApiConnectionPoolsModel, CompileOptions, EvalAllowlistModel
 
 admin_router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -293,31 +292,7 @@ class AgentConfigPartResponseModel(BaseResponseModel):
 @admin_router.post("/getAgentConfigPart", response_model=AgentConfigPartResponseModel, summary="Get a collection configuration", description="Gets one of the configurations. See the documentation for more details.")
 async def getAgentConfigPart(item: AgentConfigPartRequestModel, request: Request)-> AgentConfigPartResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
-    model = AgentConfigPartResponseModel.model_validate(ret)
-    if item.part == AgentConfigPart.prompt:
-        for row in model.configParts:
-            await _decrypt_prompt_profile(cast(PromptProfileModel, row.configValue), request)
-    return model
-
-
-
-async def _decrypt_prompt_profile(profile: PromptProfileModel, request: Request):
-    for field in ("system", "user"):
-        text = getattr(profile, field)
-        if text:
-            try:
-                setattr(profile, field, await Encryptor.decrypt_str(request, text))
-            except Exception as e:
-                MyLogger.error(f"Could not decrypt the {field} prompt of profile {profile.name!r}: {SensitiveString.safe_text(error_message(e))}")
-                RestCall.report_error_once("A prompt profile could not be decrypted.")
-                setattr(profile, field, PROMPT_DECRYPTION_ERROR)
-
-
-async def _encrypt_prompt_profile(profile: PromptProfileModel, request: Request):
-    for field in ("system", "user"):
-        text = getattr(profile, field)
-        if text:
-            setattr(profile, field, await Encryptor.encrypt_str(request, text))
+    return AgentConfigPartResponseModel.model_validate(ret)
 
 
 class UpdateSystemConfigPartModel(RequestModel):
@@ -474,8 +449,6 @@ async def upsertAgentConfigPart(item: UpsertAgentConfigPartModel, request: Reque
         raise ShowMessage(error_message(e))
     if item.configValue.type in (AgentConfigPart.llm, AgentConfigPart.api):
         _check_connection_pool(item.configValue.connectionPoolName, await api_connection_pool_names(request))
-    elif item.configValue.type == AgentConfigPart.prompt:
-        await _encrypt_prompt_profile(item.configValue, request)
     ret = await RestCall.passthrough(request,  item.model_dump())
     uec = UpsertAgentConfigPartResponseModel.model_validate(ret)
     return uec

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import copy
 from abc import ABC
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -18,10 +19,10 @@ from fastapi import Request
 from pydantic import JsonValue
 
 from search2o.common.enums import AgentWords, TraceType
-from search2o.common.exceptions import ErrorInAgent, ErrorFromCloudException, InvokedAgentFailed, ShowMessage, error_message
+from search2o.common.exceptions import ErrorInAgent, ErrorFromCloudException, ShowMessage, error_message
 from search2o.common.exprhelper import ExprHelper
 from search2o.common.flowcontrol import AgentStopped, BreakException, ContinueException, ReturnFunctionException, \
-    AgentDone, FailCommandException, FlowControlException, HookRefused
+    AgentDone, FailCommandException, FlowControlException, HookRefused, CostLimitExceeded
 from search2o.common.mynamespace import AgentNamespace, CommandNamespace
 from search2o.common.requesthelper import RequestHelper
 from search2o.common.rest_call import RestCall
@@ -37,6 +38,7 @@ from search2o.execution.streamiter import StreamIter
 from search2o.mcpclient.mcp import Mcp
 from search2o.models.agentexecmodel import FunctionExecModel, CommandExecModel, SetVariable, CommandList
 from search2o.models.prompt import LlmResponseModel
+from search2o.models.promptmodels import PromptScope
 from search2o.models.schemaobjects import CommandName, RESULT_PRODUCING_COMMANDS, VarNamespace, ReadOnlyVariable, \
     AgentExecResult
 from search2o.models.systemconfig import SysVariables
@@ -50,11 +52,9 @@ class ExecResponse:
     result_code: AgentExecResult
     output: AgentOutput | None = None
     ask_input: dict[str, Any] | None = None
-    agent_return: Any = None
     error_message: str = ""
     user_message: str = ""
     path: str = ""
-    platform_error: ErrorFromCloudException | None = None
 
 class AskException(FlowControlException):
     def __init__(self, node: Node, ask_input: dict[str, Any]):
@@ -85,7 +85,7 @@ class CommandExec(ABC):
         refused = next((e for e in flat if isinstance(e, HookRefused)), None)
         if refused:
             return refused
-        chosen = next((e for e in flat if isinstance(e, (AgentStopped, AskException))), None)
+        chosen = next((e for e in flat if isinstance(e, (AgentStopped, CostLimitExceeded, AskException))), None)
         if chosen:
             for other in flat:
                 if other is not chosen:
@@ -142,11 +142,8 @@ class Name2Command:
 class AgentExecutor:
     def __init__(self, run: "ConversationRun",
                  agent_exec: AgentExec,
-                 inputs: dict[str, Any],
-                 share_prompts: bool = True,
-                 agent_call_chain: set[str] | None = None) -> None:
+                 inputs: dict[str, Any]) -> None:
         self.run = run
-        self.agent_call_chain = agent_call_chain if agent_call_chain else set()
 
         self.agent = agent_exec.agent_definition
         self.agent_name = agent_exec.agent_name
@@ -155,7 +152,10 @@ class AgentExecutor:
         if self.agent_name not in self.conversation_state.agentVars:
             self.conversation_state.agentVars[self.agent_name] = AgentNamespace()
         self.agent_vars = self.conversation_state.agentVars[self.agent_name]
-        self.prompts = self.conversation_state.prompts if share_prompts else Prompts()
+        self.agent_prompts = agent_exec.prompts
+        self.agent_const = copy.deepcopy(agent_exec.const)
+        self.compiled = agent_exec.compiled
+        self.local_prompts = run.local_prompts
         self.current_stack: FunctionNode | None = None
 
         self.inputs = inputs
@@ -196,6 +196,13 @@ class AgentExecutor:
     @property
     def conversation_state(self) -> ConversationState:
         return self.run.conversation_state
+
+    def prompt_store(self, scope: PromptScope) -> Prompts:
+        if scope == PromptScope.agent:
+            return self.conversation_state.agentPrompts.setdefault(self.agent_name, Prompts())
+        if scope == PromptScope.local:
+            return self.local_prompts
+        return self.conversation_state.prompts
 
     @property
     def output(self) -> AgentOutput:
@@ -341,7 +348,7 @@ class AgentExecutor:
             valin = ExprHelper.get_expr(val)
             if valin:
                 try:
-                    ret = await self.runtime.execute(valin, frame.locals)
+                    ret = await self.runtime.execute(self.compiled, valin, frame.locals)
                 except ErrorInAgent:
                     raise
                 except Exception as e:
@@ -353,7 +360,8 @@ class AgentExecutor:
                 if TypeChecker.check_type(expected_type, ret):
                     return ret
                 else:
-                    raise ShowMessage(f"The expression is expected to evaluate to {expected_type} but it evaluated to {type(ret).__name__}.",
+                    where = f" at {sub_path.removeprefix('.')}" if sub_path else ""
+                    raise ShowMessage(f"The expression{where} is expected to evaluate to {expected_type} but it evaluated to {type(ret).__name__}.",
                                       path=path)
             else:
                 return val # String literal
@@ -437,6 +445,7 @@ class AgentExecutor:
         d[ReadOnlyVariable.sys.value] = sysvar
         d[ReadOnlyVariable.agent.value] = self.agent_vars
         d[ReadOnlyVariable.conv.value] = self.conversation_state.conversationVars
+        d[ReadOnlyVariable.const.value] = SimpleNamespace(**self.agent_const)
         d['__builtins__'] = self.runtime.allowlist.eval_allowlist
         d[ReadOnlyVariable.command.value] = CommandNamespace()
         return d
@@ -453,9 +462,11 @@ class AgentExecutor:
                     return name in vars(d[ReadOnlyVariable.agent.value])
                 case VarNamespace.conv:
                     return name in vars(d[ReadOnlyVariable.conv.value])
+                case ReadOnlyVariable.const:
+                    return name in vars(d[ReadOnlyVariable.const.value])
                 case "allowlist":
                     return name in d["__builtins__"]
-            raise ShowMessage("The scope given to sys.exists must be one of local, agent, conv or allowlist.")
+            raise ShowMessage("The scope given to sys.exists must be one of local, agent, conv, const or allowlist.")
         return exists
 
     @staticmethod
@@ -554,7 +565,7 @@ class AgentExecutor:
                 ae.append(FunctionNode(name=function_name, args=arg_values if arg_values else {},
                                        localVars=self.get_locals_only(frame.locals)))
                 raise
-            except (ErrorFromCloudException, AgentDone, FailCommandException, AgentStopped, HookRefused):
+            except (ErrorFromCloudException, AgentDone, FailCommandException, AgentStopped, CostLimitExceeded, HookRefused):
                 raise
             except Exception as e:
                 if function.onError:
@@ -575,30 +586,30 @@ class AgentExecutor:
             raise ShowMessage(f"Unknown function: {function_name!r}")
 
 
-    async def exec_agent(self, caller_state: list[Node] | None = None) -> ExecResponse:
+    async def exec_agent(self) -> ExecResponse:
         self.stream_iter.trace(lambda: f"Starting executing agent {self.agent_name!r}", TraceType.flow)
         agent_path_token = _calling_path.set(frozenset())
-        if caller_state is not None:
-            state = caller_state
-        else:
-            state = [] if self.agent_call_chain else self.run.prev_state
+        state = self.run.prev_state
         replay_token = _replay_state.set(state)
-        answers_token = _answers_scope.set(_answers_scope.get() if self.agent_call_chain else self.run.ask_answers)
+        answers_token = _answers_scope.set(self.run.ask_answers)
         try:
             await self.secrets.prefetch(self.secrets_used)
-            ret = await self.exec_function(AgentWords.main, None, 0 if state else -1)
-            return ExecResponse(result_code=AgentExecResult.success, output=self.output, agent_return=ret)
+            await self.exec_function(AgentWords.main, None, 0 if state else -1)
+            return ExecResponse(result_code=AgentExecResult.success, output=self.output)
         except ErrorFromCloudException as e:
             if e.status_code == 401:
                 self.stream_iter.progress("User session has expired. Must login.")
-                return ExecResponse(result_code=AgentExecResult.mustLogin, error_message=e.detail, platform_error=e)
+                return ExecResponse(result_code=AgentExecResult.mustLogin, error_message=e.detail)
             else:
-                return ExecResponse(result_code=AgentExecResult.callFailed, error_message=e.detail, platform_error=e)
+                return ExecResponse(result_code=AgentExecResult.callFailed, error_message=e.detail)
         except AgentDone:
             return ExecResponse(result_code=AgentExecResult.success, output=self.output)
         except AgentStopped:
             return ExecResponse(result_code=AgentExecResult.stopped, output=self.output,
                                 error_message="The agent was stopped.")
+        except CostLimitExceeded as e:
+            return ExecResponse(result_code=AgentExecResult.errorInAgent, error_message=e.message,
+                                user_message=e.user_message)
         except AskException as e:
             self.callstack = e.nodes[::-1]
             return ExecResponse(result_code=AgentExecResult.ask, output=self.output, ask_input=e.ask_input)
@@ -607,9 +618,6 @@ class AgentExecutor:
                                 user_message=e.message, path=e.path)
         except HookRefused:
             raise
-        except InvokedAgentFailed as e:
-            return ExecResponse(result_code=AgentExecResult.failCommand, error_message=f"{e}",
-                                user_message=e.user_message(), path=e.path)
         except ErrorInAgent as e:
             return ExecResponse(result_code=AgentExecResult.errorInAgent, error_message=f"{e}",
                                 user_message=e.user_message(), path=e.path)

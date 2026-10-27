@@ -10,7 +10,8 @@ from typing import Literal, Annotated, TypeAlias, Self
 
 from pydantic import BaseModel, Field, JsonValue, AfterValidator, model_validator
 
-from .configtypes import SystemConfigPart, AgentConfigPart, AuthMethod, ProfileName, ExprString, DynamicDict
+from .configtypes import SystemConfigPart, AgentConfigPart, AuthMethod, ProfileName, ExprString, DynamicDict, \
+    EncryptionKeyName
 from .schemaobjects import ServiceLevel
 
 ProfileDoc = Annotated[str, Field(default="", title="Documentation", description="Documentation of what this profile is used for. This field is optional. It can be useful in generating agent definitions.", max_length=500)]
@@ -150,11 +151,18 @@ class DbConnectionPool(BaseModel):
         title="Driver arguments",
         description="Arguments passed straight through to the database driver. Certificate files belong here.",
     )
+    idleTimeout: int = Field(
+        default=300,
+        ge=0,
+        title="Idle timeout (seconds)",
+        description="Close a pool and its connections after it has not been used for this many seconds. 0 keeps it open until the profile changes.",
+    )
 
 
 class DbConnectionModel(NamedBaseModel, SecretsUsedModel):
     type: Literal[AgentConfigPart.db] = Field(default=AgentConfigPart.db, title="Config part", description="Identifies which configuration part this is.")
-    connectionString: ExprString | None = Field(default=None, title="Connection string", description="The database connection string. It must specify an async driver installed in your Python environment: sqlite+aiosqlite, mysql+aiomysql, postgresql+asyncpg or oracle+oracledb.")
+    connectionString: ExprString | None = Field(default=None, title="Connection string", description="The database connection string. It must specify an async driver installed in your Python environment: sqlite+aiosqlite, mysql+aiomysql, postgresql+asyncpg or oracle+oracledb. When it comes out different from the one a pool was opened with, for example after a password is rotated, that pool is closed and a new one opened.")
+    poolKey: ExprString | None = Field(default=None, title="Pool key", description="Leave empty to share one connection pool across every run that uses this profile. If the connection string differs per user, for example because each user connects with their own credentials, set this to an expression that tells them apart, such as { sys.userEmail }, so each gets their own pool.")
     connectionPool: DbConnectionPool = Field(default_factory=DbConnectionPool, title="Connection pool", description="Pool settings for connections to this database.")
 
 def not_reserved_function(value: str) -> str:
@@ -216,11 +224,6 @@ class LlmModel(NamedBaseModel, SecretsUsedModel):
     toolErrorPrompt: str = Field(default="Tool returned an error. If changing the arguments to the tool would get past this error, change the arguments. Otherwise, if the tool can be skipped, skip it. As a last resort, provide a text error message and end the conversation.", title="Tool error prompt",
                              description="The user prompt sent to the LLM when a tool call fails.")
 
-
-class PromptProfileModel(NamedBaseModel):
-    type: Literal[AgentConfigPart.prompt] = Field(default=AgentConfigPart.prompt, title="Config part", description="Identifies which configuration part this is.")
-    system: str | None = Field(default=None, title="System prompt", description="The system prompt. Usually set once per conversation. Stored encrypted; Search2o Cloud never holds the text.")
-    user: str | None = Field(default=None, title="User prompt", description="The user prompt. Can be set many times; those set before one LLM call are merged into a single string. Stored encrypted; Search2o Cloud never holds the text.")
 
 class SecretConversionOptions(StrEnum):
     upper = auto()
@@ -386,7 +389,7 @@ class AgentValidationModel(BaseModel):
     type: Literal[SystemConfigPart.validation] = Field(default=SystemConfigPart.validation, title="Config part", description="Identifies which configuration part this is.")
     maxIterationLoops: int = Field(default=10_000, title="Max loop iterations",
                                    description="The most iterations a 'while' or 'for' may run. A loop inside a loop is counted separately.", ge=0)
-    yieldLoopsAfter: int = Field(default=1_000, title="Yield loops after", description="How many iterations a loop runs before yielding, so the runtime limit can be checked.")
+    yieldLoopsAfter: int = Field(default=1_000, ge=1, title="Yield loops after", description="How many iterations a loop runs before yielding, so the runtime limit can be checked.")
     dbMaxRows: int = Field(default=10000, title="Max rows from a db call", description="The most rows a single db command may return.")
     agentMaxLength: int = Field(default=20480, title="Max agent length", description="The most characters an agent definition may contain.")
     streamHeartbeat: int = Field(default=15, title="Stream heartbeat (seconds)", description="How often a noop is sent on an idle output stream, in seconds, so browsers and proxies do not close it while the agent works.", ge=1)
@@ -442,6 +445,7 @@ class AgentServerModel(BaseModel):
     logs: dict[str, JsonValue] = Field(default_factory=dict, title="Logging", description="Logging configuration for the agent server.")
     cloudPool: ConnectionPoolModel = Field(default_factory=ConnectionPoolModel, title="Cloud connection pool", description="How this agent server connects to Search2o Cloud. It carries connection settings only: it is deliberately not one of the API connection pools, and it has no certificate fields, so nothing configured for an agent can change how this server reaches Search2o Cloud. A server behind a proxy that re-signs TLS trusts that proxy through the SSL_CERT_FILE environment variable, which is where a machine-wide trust setting belongs. Changing any of this needs an agent server restart.")
     uiConfig: dict[str, JsonValue] = Field(default_factory=dict, title="UI configuration", description="A free form JSON configuration that is sent to the UI from the getUiConfig call.")
+    shutdownGrace: int = Field(default=10, ge=0, title="Shutdown grace (seconds)", description="When this agent server shuts down, how many seconds agents that are still running get to finish before they are stopped. Changing this needs an agent server restart.")
 
 
 class AgentServerModels(BaseModel):
@@ -464,7 +468,7 @@ class EncryptionSource(StrEnum):
     cloud = auto()
 
 class EncryptionKey(BaseModel):
-    keyName: str = Field(..., title="Key name", description="The name the key is referred to by.")
+    keyName: EncryptionKeyName = Field(..., title="Key name", description="The name your encryptionKey hook looks the key up by, such as my-key, alias/my-key or a key ARN. Letters, digits and _ . - : /, starting and ending with a letter or digit, up to 256 characters.")
     createdAt: int = Field(..., title="Created at", description="When the key was created, in epoch milliseconds.")
 
 class EncryptionModel(BaseModel):
@@ -482,9 +486,9 @@ class HooksModel(BaseModel):
     type: Literal[SystemConfigPart.hooks] = Field(default=SystemConfigPart.hooks, title="Config part", description="Python functions and classes this server calls at set points. They are loaded when the agent server starts, so a change takes effect only after a restart. A path that cannot be loaded is logged, and the agent server then refuses to run agents until it is fixed. Every function must be async and takes one dict argument holding what is relevant to the call, including isValidation. Only vault, encryptionKey and restore return a value. To refuse, a function raises an exception, and its message is shown as it is. The code must be installed on every agent server of this account.")
     onStart: ImportPath | None = Field(default=None, title="On server start", description="Called once when the agent server starts. If it raises, the server does not start.")
     onEnd: ImportPath | None = Field(default=None, title="On server stop", description="Called when the agent server shuts down normally. It is not called if the process is killed. If it raises, the message is logged.")
-    onAgentStart: ImportPath | None = Field(default=None, title="On agent start", description="Called before a top-level agent runs, with isNewConversation and startFromAsk. It is not called for agents that another agent invokes. If it raises, the agent stops.")
-    onAgentEnd: ImportPath | None = Field(default=None, title="On agent end", description="Called after a top-level agent finishes successfully or pauses to ask, with endWithAsk, before the run is recorded. It is not called for agents that another agent invokes. If it raises, the agent fails.")
-    onAgentError: ImportPath | None = Field(default=None, title="On agent error", description="Called after a top-level agent fails, before the run is recorded. It is not called for agents that another agent invokes. If it raises, its message is reported as the error.")
+    onAgentStart: ImportPath | None = Field(default=None, title="On agent start", description="Called before an agent runs, with isNewConversation and startFromAsk. If it raises, the agent stops.")
+    onAgentEnd: ImportPath | None = Field(default=None, title="On agent end", description="Called after an agent finishes successfully or pauses to ask, with endWithAsk, before the run is recorded. If it raises, the agent fails.")
+    onAgentError: ImportPath | None = Field(default=None, title="On agent error", description="Called after an agent fails, before the run is recorded. If it raises, its message is reported as the error.")
     onAgentPublish: ImportPath | None = Field(default=None, title="On agent publish", description="Called after an agent is published, with its name, version, definition, title, tag and the publisher's email. If it raises, the caller gets an error that says the agent was published.")
     onAgentDelete: ImportPath | None = Field(default=None, title="On agent delete", description="Called after an agent is deleted, with its name. If it raises, the caller gets an error that says the agent was deleted.")
     save: ImportPath | None = Field(default=None, title="Save conversation state", description="Stores a conversation's state, given convid, state, userEmail and agentName. The state is not encrypted by this server, and ownership is not checked by Search2o Cloud. Validation runs keep their state in Search2o Cloud. Set together with restore and deleteConversation.")
@@ -523,8 +527,7 @@ AgentConfigModelUnion: TypeAlias = Annotated[
         LlmModel
         | ApiServerModel
         | McpServerModel
-        | DbConnectionModel
-        | PromptProfileModel,
+        | DbConnectionModel,
         Field(discriminator="type"),
 ]
 
@@ -541,6 +544,8 @@ class AgentRuntime(BaseModel):
     isBuiltinAllowed: bool = Field(default=True, title="Password sign-in allowed", description="Whether a password sign-in is offered as well. False only when single sign-on is the only way in.")
     integrationTokenMaxAgeDays: int | None = Field(default=None, title="Integration token max age (days)", description="The longest an integration token may last on this account, so a client can bound what it asks for. Empty means they do not expire.")
     agentLastChanged: dict[str, int] = Field(default_factory=dict, title="Agents last changed", description="When each agent that changed since the last refresh was last changed (lastChanged, epoch milliseconds), so an agent server can drop the ones it has cached. It moves on any change to the agent - definition, title, tag, run time or cost limit - not just a new version.")
+    agentStatusUpdated: int = Field(default=0, title="Agent status updated", description="When an agent was last added or deleted, in epoch milliseconds. An agent server sends it back as lastUpdatedAgentStatus.")
+    agentNames: list[str] | None = Field(default=None, title="Agent names", description="Every agent in the account, sent only when agentStatusUpdated differs from the lastUpdatedAgentStatus the agent server sent. An agent server drops every cached agent not in it. Left out when nothing was added or deleted; an empty list means the account has no agents.")
 
 
 class InitModel(BaseModel):

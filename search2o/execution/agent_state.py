@@ -9,13 +9,12 @@ from typing import Any
 from pydantic import BaseModel, JsonValue, Field, TypeAdapter, ValidationError
 
 from search2o.common.exceptions import ShowMessage
-from search2o.common.htmlchecker import HtmlChecker
 from search2o.common.mynamespace import ConvNamespace, ConvNamespaceField, AgentNamespaceField
 from search2o.execution.llmresponse import LlmResponse
 from search2o.execution.prompts import Prompts
 from search2o.execution.statenodes import NodeUnion
 from search2o.models.prompt import TextPart, ContentOutput, ImagePart, ToolCalls
-from search2o.models.schemaobjects import TextPartApi, HtmlPartApi, ImagePartApi, ContentPartApi, \
+from search2o.models.schemaobjects import TextPartApi, ImagePartApi, ContentPartApi, \
     CommandName
 
 
@@ -31,24 +30,17 @@ class AgentOutput(BaseModel):
         parts.append(TextPartApi(text=text))
 
     @staticmethod
-    def _add_html(parts: list[ContentPartApi], html: str):
-        parts.append(HtmlPartApi(text=html))
-
-    @staticmethod
     def _add_image(parts: list[ContentPartApi], data: str, mt: str):
         if not mt:
             raise ShowMessage("mimeType must be specified for image output")
-        parts.append(ImagePartApi(text=data, mimeType=mt))
+        parts.append(ImagePartApi(data=data, mimeType=mt))
 
 
     def _add_llm(self, parts: list[ContentPartApi], co: ContentOutput | ToolCalls):
         if isinstance(co, ContentOutput):
             for part in co.parts:
                 if isinstance(part, TextPart):
-                    if part.text and HtmlChecker.is_html(part.text):
-                        self._add_html(parts, part.text)
-                    else:
-                        self._add_str(parts, part.text)
+                    self._add_str(parts, part.text)
                 elif isinstance(part, ImagePart):
                     self._add_image(parts, part.contentBase64, part.mimeType)
         elif isinstance(co, ToolCalls):
@@ -61,7 +53,7 @@ class AgentOutput(BaseModel):
             part = _CONTENT_PART.validate_python(d)
         except ValidationError:
             raise ShowMessage(f"A part of the '{CommandName.output}' command must have a contentType of "
-                              f"'text', 'html' or 'image' and the content in 'text'. "
+                              f"'text' or 'image', with the text in 'text', or the base64 image in 'data' and its 'mimeType'. "
                               f"Got: {json.dumps(d, default=str)}")
         if isinstance(part, ImagePartApi) and not part.mimeType:
             raise ShowMessage(f"An image part of the '{CommandName.output}' command must have a mimeType.")
@@ -105,12 +97,14 @@ class AgentRun(BaseModel):
     inputs: dict[str, JsonValue]
     output: AgentOutput = Field(default_factory=AgentOutput)
     callstack: list[NodeUnion] = []
+    localPrompts: Prompts | None = None
     execAt: int
 
 
 class ConversationState(BaseModel):
     runs: list[AgentRun] = Field(default_factory=list)
     prompts: Prompts = Field(default_factory=Prompts)
+    agentPrompts: dict[str, Prompts] = Field(default_factory=dict)
 
     conversationVars: ConvNamespaceField = Field(
         default_factory=ConvNamespace

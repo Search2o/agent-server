@@ -15,15 +15,16 @@ from pydantic import BaseModel
 from search2o.common.enums import TraceType
 from search2o.common.epoch import Epoch
 from search2o.common.exceptions import ShowMessage, error_message
-from search2o.common.flowcontrol import HookRefused
+from search2o.common.flowcontrol import CostLimitExceeded, HookRefused
 from search2o.common.mylogger import MyLogger
 from search2o.common.rest_call import RestCall
 from search2o.common.sensitivestring import JsonValue
 from search2o.execution.agent_state import AgentOutput, AgentRun, ConversationState
-from search2o.execution.agentexec import AgentExec
+from search2o.execution.agentexec import AgentExec, dollars
 from search2o.execution.encryptor import Encryptor
 from search2o.execution.hooks import Hooks
 from search2o.execution.llmresponse import LlmResult, LlmTokens
+from search2o.execution.prompts import Prompts
 from search2o.execution.runref import RunRef
 from search2o.execution.runtime import RuntimeState, Runtime
 from search2o.execution.savedstate import saved_state_text
@@ -74,12 +75,14 @@ class ConversationRun:
             self.paused_agent_name: str | None = last_run.agentName
             self.paused_agent_version: int = last_run.agentVersion
             self.prev_state: list[Node] = last_run.callstack
+            self.local_prompts: Prompts = last_run.localPrompts or Prompts()
             self.ask_answers: dict[str, Any] | None = inputs
             self.inputs: dict[str, Any] = last_run.inputs
         else:
             self.paused_agent_name = None
             self.paused_agent_version = 0
             self.prev_state = []
+            self.local_prompts = Prompts()
             self.ask_answers = None
             self.inputs = inputs
         self.query: str = self.inputs.get("query", "")
@@ -176,7 +179,8 @@ class ConversationRun:
             return er
         self.conversation_state.runs.append(AgentRun(inputs=self.inputs, agentName=self.agent_name,
                                                      agentVersion=self.agent_version, output=self.output,
-                                                     execAt=Epoch.ms(), callstack=self.callstack))
+                                                     execAt=Epoch.ms(), callstack=self.callstack,
+                                                     localPrompts=self.local_prompts if self.callstack else None))
         try:
             self.state_text = saved_state_text(self.conversation_state)
         except ShowMessage as e:
@@ -228,7 +232,7 @@ class ConversationRun:
         self.llm_calls.append(LlmResult(
             profile=profile,
             model=model,
-            tool_call=isinstance(res.assistant.response, ToolCalls),
+            tool_call=res.assistant is not None and isinstance(res.assistant.response, ToolCalls),
             input_tokens=LlmTokens(text=res.inputTextTokens, image=res.inputImageTokens),
             output_tokens=LlmTokens(text=res.outputTextTokens, image=res.outputImageTokens),
             duration=llm_duration
@@ -240,8 +244,8 @@ class ConversationRun:
         self.llmDuration += llm_duration
         self.llmCost += cost
         if self.llmCost > self.agent_exec.max_cost:
-            raise ShowMessage(f"Agent LLM cost exceeded the limit set per run for this agent: {self.agent_exec.max_cost}",
-                              "This request was stopped because it reached the cost limit set for this agent.")
+            raise CostLimitExceeded(f"Agent LLM cost exceeded the limit set per run for this agent: {dollars(self.agent_exec.max_cost)}",
+                                    "This request was stopped because it reached the cost limit set for this agent.")
 
     ENCRYPTED_QUERY_MAX: ClassVar[int] = 200
 

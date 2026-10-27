@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from mcp import McpError
@@ -40,6 +41,9 @@ class Mcp:
         stream_iter.trace(lambda: f"Creating connection to MCP server {self.mcp_name}: {self.mcp_server.url}", TraceType.tool)
         try:
             await self.client.create()
+        except asyncio.CancelledError:
+            await self.close()
+            raise
         except (Exception, BaseExceptionGroup) as e:
             await self.client.close()
             self.client = None
@@ -48,6 +52,9 @@ class Mcp:
 
         try:
             resp = await self.client.list_tools()
+        except asyncio.CancelledError:
+            await self.close()
+            raise
         except (Exception, BaseExceptionGroup) as e:
             await self.client.close()
             self.client = None

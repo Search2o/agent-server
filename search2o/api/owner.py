@@ -23,7 +23,7 @@ class PastInvoiceModel(RequestModel):
 
 @owner_router.post("/getCurrentInvoice", response_model=InvoiceResponseModel,
                    summary="Get the current invoice",
-                   description="The invoice for the billing period in progress, as rows to display, with the past periods that can be fetched with getPastInvoice.")
+                   description="The invoice for the billing period in progress, as rows to display, with the past periods that can be fetched with getPastInvoice. Refused for an account that is not on a paid plan.")
 async def getCurrentInvoice(item: EmptyRequestModel, request: Request) -> InvoiceResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
     return InvoiceResponseModel.model_validate(ret)
@@ -44,11 +44,12 @@ class AccountModel(BaseResponseModel):
     billingName: str | None = Field(default=None, title="Billing name", description="The name the payment provider knows this account by. Set when the account is registered and not changed here.")
     serviceLevel: ServiceLevel = Field(default=ServiceLevel.free, title="Service level", description="What this account is entitled to. It changes to paid through startPaidService and cannot be changed here.")
     billingStartAt: int | None = Field(default=None, title="Billing start", description="When this account began paying, in epoch milliseconds. Empty until the account moves to a paid plan.", json_schema_extra={"format": "int64"})
+    paidServiceAvailable: bool = Field(default=False, title="Paid service available", description="Whether this account can move to a paid plan now. When false, startPaidService is refused.")
     createdAt: int = Field(..., description="Account creation date in epoch milliseconds.", json_schema_extra={"format": "int64"})
 
 @owner_router.post("/getAccount", response_model=AccountModel,
                   summary="Get account details",
-                  description="Details of this Search2o account: the account name, the billing and contact emails, and when the account was created.")
+                  description="Details of this Search2o account: the account name, the billing and contact emails, the service level, whether a paid plan is available, and when the account was created.")
 async def getAccount(request: Request) -> AccountModel:
     ret = await RestCall.passthrough(request)
     return AccountModel.model_validate(ret)
@@ -76,7 +77,7 @@ class StartPaidServiceResponseModel(BaseResponseModel):
 
 @owner_router.post("/startPaidService", response_model=StartPaidServiceResponseModel,
                   summary="Start paid service",
-                  description="Moves this account onto a paid plan at once. There is no approval step. It takes no parameters, and returns the new service level and when billing starts.")
+                  description="Moves this account onto a paid plan at once. There is no approval step. It takes no parameters, and returns the new service level and when billing starts. Refused when paid plans are not available, which getAccount reports in paidServiceAvailable.")
 async def startPaidService(item: EmptyRequestModel, request: Request) -> StartPaidServiceResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
     return StartPaidServiceResponseModel.model_validate(ret)

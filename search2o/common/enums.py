@@ -85,12 +85,12 @@ class AgentWords(CaseSensitiveStrEnum):
     preToolCall = auto()
     profile = auto()
     prompt = auto()
+    prompts = auto()
     pydanticClass = auto()
     query = auto()
     queryParams = auto()
     result = auto()
     shareContext = auto()
-    sharePrompts = auto()
     source = auto()
     sql = auto()
     start = auto()
@@ -127,7 +127,6 @@ class TraceType(CaseSensitiveStrEnum):
     input = auto()  # What a command was called with: the LLM request, the API url, the SQL
     output = auto() # What a command returned: LLM content and tokens, the API response, row counts
     tool = auto()   # Tool calls made by the LLM: agent functions and MCP tools, with their results
-    invoke = auto() # Nested agents
     agent = auto()  # The trace command written in the agent
     error = auto()  # Anything reporting a failure, including serialization warnings
 

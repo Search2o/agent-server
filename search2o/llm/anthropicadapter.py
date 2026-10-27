@@ -14,9 +14,19 @@ from search2o.models.prompt import ToolCall, ContentOutput, TextPart, ToolCalls,
     PromptElement, ImagePart, LlmResponseModel, LlmRequestModel
 
 
+_THINKING_BLOCKS = ("thinking", "redacted_thinking")
+
+
 class AnthropicAdapter(BaseLlmAdapter):
     def name(self) -> str:
         return "anthropic"
+
+    def forced_tool_choice_problem(self, req: LlmRequestModel) -> str:
+        thinking = req.additionalParams.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("type") not in (None, "disabled"):
+            return ("it turns on Anthropic's extended thinking, and Anthropic does not allow the forced tool "
+                    "call that structured output relies on while thinking is on.")
+        return ""
 
     def description(self) -> str:
         return "Adapter for Anthropic or any vendor that is compatible with it"
@@ -86,14 +96,15 @@ class AnthropicAdapter(BaseLlmAdapter):
             messages.append({"role": "user", "content": content})
 
     def set_messages_assistant_response_tool_calls(self, req: LlmRequestModel, params: dict[str, Any], me: PromptElement, messages: list):
-        messages.append({"role": "assistant", "content": [
+        thinking = (me.response.additionalFields or {}).get("thinking") or []
+        messages.append({"role": "assistant", "content": [*thinking, *[
             {
                 "type": "tool_use",
                 "id": tc.id,
                 "name": tc.name,
                 "input": tc.args,
             } for tc in me.response.tools
-        ]})
+        ]]})
 
     def set_messages_assistant_response_content_output(self, req: LlmRequestModel, params: dict[str, Any], me: PromptElement, messages: list):
         parts: list = []
@@ -147,6 +158,7 @@ class AnthropicAdapter(BaseLlmAdapter):
 
     def set_assistant_vendor(self, llm_response: LlmResponseModel, tool_calls: ToolCalls, content: ContentOutput, response: dict[str, JsonValue]):
         res_content = response.get("content", [])
+        thinking = []
         for tc in res_content:
             if tc.get("type") == "tool_use":
                 tool_calls.tools.append(ToolCall(id=tc.get("id"),
@@ -154,3 +166,7 @@ class AnthropicAdapter(BaseLlmAdapter):
                                                  args=tc.get("input")))
             elif tc.get("type") == "text":
                 content.parts.append(TextPart(text=tc.get("text")))
+            elif tc.get("type") in _THINKING_BLOCKS:
+                thinking.append(tc)
+        if thinking and tool_calls.tools:
+            tool_calls.additionalFields = {"thinking": thinking}

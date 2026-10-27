@@ -222,13 +222,22 @@ class SensitiveString:
         parts: list[str] = []
         buf: list[str] = []
         quote: str | None = None
-        for ch in s:
-            if quote:
+        i = 0
+        while i < len(s):
+            ch = s[i]
+            i += 1
+            if quote == "}" and ch == "}" and s[i:i + 1] == "}":
+                buf.append("}}")
+                i += 1
+            elif quote:
                 buf.append(ch)
                 if ch == quote:
                     quote = None
             elif ch in ("'", '"'):
                 quote = ch
+                buf.append(ch)
+            elif ch == "{":
+                quote = "}"
                 buf.append(ch)
             elif ch == ";":
                 parts.append("".join(buf))
@@ -266,6 +275,8 @@ class SensitiveString:
                 inner = value_stripped[1:-1]
                 masked_inner = cls._mask_value_str(inner)
                 new_value = f"{quote}{masked_inner}{quote}"
+            elif value_stripped.startswith("{") and value_stripped.endswith("}"):
+                new_value = "{" + cls._mask_value_str(value_stripped[1:-1]) + "}"
             else:
                 new_value = cls._mask_value_str(value_stripped) if value_stripped else "***"
 
@@ -280,16 +291,22 @@ class SensitiveString:
         if not s:
             return s
 
-        parsed = urlparse(s)
+        try:
+            parsed = urlparse(s)
+        except ValueError:
+            return "[unreadable URL]"
         if parsed.scheme not in ("http", "https"):
             # Not a URL we recognize → return unchanged
             return s
 
         # Mask userinfo: user:pass@
-        username = parsed.username
-        password = parsed.password
-        hostname = parsed.hostname
-        port = parsed.port
+        try:
+            username = parsed.username
+            password = parsed.password
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            return f"{parsed.scheme}://[unreadable URL]"
 
         netloc = ""
         if username is not None or password is not None:
@@ -300,7 +317,7 @@ class SensitiveString:
             netloc += "@"
 
         if hostname:
-            netloc += hostname
+            netloc += f"[{hostname}]" if ":" in hostname else hostname
         if port is not None:
             netloc += f":{port}"
 
@@ -395,27 +412,33 @@ class SensitiveString:
                 )
                 \s*
                 (?:
-                    bearer\s+
+                    (?:bearer|basic|token|apikey)\s+
                 )?
-                ["']?
             )
-            (?P<value>
-                [^"',;\s\}}\]\)]+
+            (?:
+                (?P<quote>["'])
+                (?P<quoted>[^"'\r\n]+)
+                (?P=quote)
+                |
+                (?P<value>
+                    [^"',;\s\}}\]\)]+
+                )
             )
-            (?P<suffix>["']?)
             """,
             re.VERBOSE,
         )
 
         def _mask_kv_match(match: re.Match[str]) -> str:
-            value = match.group("value")
-            return f"{match.group('prefix')}{cls._mask_value_str(value)}{match.group('suffix')}"
+            if match.group("quoted") is not None:
+                quote = match.group("quote")
+                return f"{match.group('prefix')}{quote}{cls._mask_value_str(match.group('quoted'))}{quote}"
+            return f"{match.group('prefix')}{cls._mask_value_str(match.group('value'))}"
 
         s = pattern.sub(_mask_kv_match, s)
 
         s = re.sub(
-            r"(?i)\bBearer\s+([A-Za-z0-9._~+/=-]{8,})",
-            lambda m: "Bearer " + cls._mask_value_str(m.group(1)),
+            r"(?i)\b(Bearer|Basic)\s+([A-Za-z0-9._~+/=-]{8,})",
+            lambda m: f"{m.group(1)} " + cls._mask_value_str(m.group(2)),
             s,
         )
 

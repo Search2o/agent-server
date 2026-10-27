@@ -168,7 +168,8 @@ class RestCall:
                                   {"event": event, "message": message[:_REPORT_MESSAGE_MAX]},
                                   client=await cls.get_client(), timeout=cls.ERROR_TIMEOUT)
         except Exception as e:
-            MyLogger.warning(f"Could not report the server event {event!r} to the cloud: {error_message(e)}")
+            cause = f" ({type(e.__cause__).__name__}: {e.__cause__})" if e.__cause__ else ""
+            MyLogger.warning(f"Could not report the server event {event!r} to the cloud: {error_message(e)}{cause}")
 
     @classmethod
     async def report_error(cls, request: Request, message: str, exc: Exception)-> None:

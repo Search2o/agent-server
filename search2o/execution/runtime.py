@@ -14,13 +14,11 @@ from fastapi import Request
 from pydantic import BaseModel
 
 from search2o.common.closable import Closable
-from search2o.common.exceptions import ShowMessage, InitializationError, error_message
+from search2o.common.exceptions import ShowMessage, InitializationError
 from search2o.common.mylogger import MyLogger
 from search2o.database.db import Database
 from search2o.execution.agentexec import AgentExec
-from search2o.common.sensitivestring import SensitiveString
 from search2o.execution.allowlist import Allowlist
-from search2o.execution.encryptor import Encryptor
 from search2o.execution.hooks import Hooks
 from search2o.execution.network import Network
 from search2o.execution.secretsmanager import SecretCache
@@ -28,7 +26,7 @@ from search2o.llm.llmcontext import AllLlmContexts
 from search2o.models.configtypes import AuthMethod, SystemConfigPart, AgentConfigPart
 from search2o.models.schemaobjects import ServiceLevel
 from search2o.models.systemconfig import AgentValidationModel, ApiServerModel, DbConnectionModel, \
-    McpServerModel, PromptProfileModel, AgentRuntime, \
+    McpServerModel, AgentRuntime, \
     LlmModel, NamedBaseModel, AgentSecretsModel, EncryptionModel, \
     AgentConfigModelUnion, ApiConnectionPoolsModel, SysVar
 
@@ -36,11 +34,8 @@ C = TypeVar("C", bound=BaseModel)
 T = TypeVar("T", bound=NamedBaseModel)
 
 
-PROMPT_DECRYPTION_ERROR = "Decryption error"
-
 
 class RuntimeState:
-    _compiledExpr: dict[str, types.CodeType] = {}
 
     def __init__(self):
         self.retired: list[Closable] = []
@@ -57,7 +52,6 @@ class RuntimeState:
         self.db_service: dict[str, DbConnectionModel]
         self.llm_options: dict[str, LlmModel]
         self.mcp_servers: dict[str, McpServerModel]
-        self.prompts: dict[str, PromptProfileModel]
 
         self.network: Network | None = None
         self.db_connections: Database | None = None
@@ -70,7 +64,6 @@ class RuntimeState:
         self.validation = self._d2m(ar, SystemConfigPart.validation) if SystemConfigPart.validation in ar.updatedSystemConfigs else prev.validation
         self.encryption_model = self._d2m(ar, SystemConfigPart.encryption) if SystemConfigPart.encryption in ar.updatedSystemConfigs else prev.encryption_model
         self.sysvar = self._d2m(ar, SystemConfigPart.sysvar) if SystemConfigPart.sysvar in ar.updatedSystemConfigs else prev.sysvar
-        self.prompts = self._l2d(ar, AgentConfigPart.prompt) if AgentConfigPart.prompt in ar.updatedAgentConfigs else prev.prompts
         self.mcp_servers = self._l2d(ar, AgentConfigPart.mcp) if AgentConfigPart.mcp in ar.updatedAgentConfigs else prev.mcp_servers
 
         new_allowlist_model = self._d2m(ar, SystemConfigPart.allowlist)
@@ -81,19 +74,6 @@ class RuntimeState:
                            f"them here: {entries}")
             from search2o.common.rest_call import RestCall
             RestCall.report_error_once("Some allowlist entries could not be loaded on this agent server.")
-
-        if AgentConfigPart.prompt in ar.updatedAgentConfigs:
-            for profile in self.prompts.values():
-                for field in ("system", "user"):
-                    text = getattr(profile, field)
-                    if text:
-                        try:
-                            setattr(profile, field, await Encryptor.decrypt(request, self, text))
-                        except Exception as e:
-                            MyLogger.error(f"Could not decrypt the {field} prompt of profile {profile.name!r}: {SensitiveString.safe_text(error_message(e))}")
-                            from search2o.common.rest_call import RestCall
-                            RestCall.report_error_once("A prompt profile could not be decrypted.")
-                            setattr(profile, field, PROMPT_DECRYPTION_ERROR)
 
         if SystemConfigPart.secrets in ar.updatedSystemConfigs:
             self.secrets_model = self._d2m(ar, SystemConfigPart.secrets)
@@ -157,11 +137,11 @@ class RuntimeState:
         return ret
 
     @classmethod
-    async def execute(cls, expr: str, d: dict) -> Any:
-        ce = cls._compiledExpr.get(expr)
+    async def execute(cls, compiled: dict[str, types.CodeType], expr: str, d: dict) -> Any:
+        ce = compiled.get(expr)
         if not ce:
             ce = compile(expr, "<string>", "exec")
-            cls._compiledExpr[expr] = ce
+            compiled[expr] = ce
         return await cls.execute_expr(ce, d)
 
     @staticmethod
@@ -190,6 +170,7 @@ class Runtime:
     auth_method: ClassVar[AuthMethod] = AuthMethod.builtin
     is_builtin_allowed: ClassVar[bool] = True
     integration_token_max_age_days: ClassVar[int | None] = None
+    agent_status_updated: ClassVar[int] = 0
     _update_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
     _bg_tasks: ClassVar[set[asyncio.Task]] = set()
     _running: ClassVar[dict[str, int]] = {}
@@ -262,7 +243,8 @@ class Runtime:
     @classmethod
     async def update(cls, request: Request | None = None, update_at: int = 0):
         from search2o.common.rest_call import RestCall
-        rt0 = (await RestCall.call_method(request, "getRuntime", {"lastUpdatedAt": update_at})).get("runtime")
+        rt0 = (await RestCall.call_method(request, "getRuntime", {"lastUpdatedAt": update_at,
+                                                                  "lastUpdatedAgentStatus": cls.agent_status_updated})).get("runtime")
         rt = AgentRuntime.model_validate(rt0)
         cls.account_name = rt.accountName
         cls.service_level = rt.serviceLevel
@@ -272,7 +254,11 @@ class Runtime:
         cls.auth_method = rt.authMethod
         cls.is_builtin_allowed = rt.isBuiltinAllowed
         cls.integration_token_max_age_days = rt.integrationTokenMaxAgeDays
-        cls._remove_stale_agents(rt.agentLastChanged)
+        async with cls._agents_lock:
+            cls._remove_stale_agents(rt.agentLastChanged)
+            if rt.agentNames is not None:
+                cls._remove_deleted_agents(set(rt.agentNames))
+        cls.agent_status_updated = rt.agentStatusUpdated
         if update_at == 0:
             cls.initial_update_check(rt)
         state = RuntimeState()
@@ -291,10 +277,11 @@ class Runtime:
             agent = cls._agents.get(name)
             if not agent:
                 obj = await RestCall.call_method(request, "getAgentForExecution", {"agentName": name})
+                const = await AgentExec.decrypt_const(request, cls.current(), name, obj.get("const"))
                 agent = AgentExec(obj.get("agentName"), obj.get("agentTitle"),
                                   obj.get("agentVersion"), obj.get("agentDefinition"),
                                   obj.get("maxTime"), obj.get("maxCost"), obj.get("secretsUsed"),
-                                  obj.get("lastChanged") or 0)
+                                  obj.get("lastChanged") or 0, obj.get("agentPrompts"), const)
                 cls._agents[name] = agent
             return agent
 
@@ -304,6 +291,11 @@ class Runtime:
             agent = cls._agents.get(name)
             if agent and agent.last_changed != last_changed:
                 cls._agents.pop(name, None)
+
+    @classmethod
+    def _remove_deleted_agents(cls, agent_names: set[str]) -> None:
+        for name in set(cls._agents) - agent_names:
+            cls._agents.pop(name, None)
 
     @classmethod
     def current(cls):
@@ -321,6 +313,15 @@ class Runtime:
                 error = True
         if error:
             raise InitializationError("Unexpected error in initializing the agent server. Please report.")
+
+    @classmethod
+    async def stop_tasks(cls, grace: float) -> None:
+        if cls._bg_tasks:
+            _, running = await asyncio.wait(set(cls._bg_tasks), timeout=grace)
+            for task in running:
+                task.cancel()
+        while unfinished := [t for t in cls._bg_tasks if not t.done()]:
+            await asyncio.gather(*unfinished, return_exceptions=True)
 
     @classmethod
     async def close(cls):

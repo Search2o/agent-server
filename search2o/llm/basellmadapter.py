@@ -47,9 +47,9 @@ class BaseLlmAdapter(LlmAdapter):
         return llm_response
 
     def get_error(self, req: LlmRequestModel, response: dict[str, JsonValue]) -> str:
-        error = response.get("error")
+        error = response.get("error") or response.get("message") or response.get("detail")
         if error:
-            if isinstance(error, dict):
+            if isinstance(error, (dict, list)):
                 return json.dumps(error, indent=2)
             else:
                 return str(error)

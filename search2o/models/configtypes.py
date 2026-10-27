@@ -18,6 +18,8 @@ SAFE_EXPR_PATTERN = r"^(?:\{[\x20-\x7E\t\r\n]*\}|[^{][\s\S]*|\{(?:[\s\S]*[^}])?|
 
 
 class ExprString(str):
+    maxLength: int | None = 5000
+
     @classmethod
     def __get_pydantic_core_schema__(
             cls,
@@ -26,13 +28,13 @@ class ExprString(str):
     ) -> CoreSchema:
         str_schema = core_schema.str_schema(
             pattern=SAFE_EXPR_PATTERN,
-            max_length=5000,
+            max_length=cls.maxLength,
         )
 
         return core_schema.no_info_after_validator_function(
             cls,
             str_schema,
-            ref="ExprString",
+            ref=cls.__name__,
         )
 
     @classmethod
@@ -44,6 +46,10 @@ class ExprString(str):
         json_schema = handler(schema)
         json_schema["title"] = "Static string like \" ... \" or a Python expression within braces, like \"{ ... }\""
         return json_schema
+
+
+class PromptText(ExprString):
+    maxLength = None
 
 
 class SystemConfigPart(StrEnum):
@@ -76,7 +82,6 @@ class AgentConfigPart(StrEnum):
     api = auto()
     mcp = auto()
     db = auto()
-    prompt = auto()
 
 
 identifierPattern = r"^[A-Za-z][A-Za-z0-9_]*[A-Za-z0-9]$"
@@ -107,6 +112,9 @@ MemoryLabel = SafeName
 
 serviceAccountNamePattern = r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$"
 ServiceAccountName = Annotated[str, Field(pattern=serviceAccountNamePattern, min_length=1, max_length=64)]
+
+encryptionKeyNamePattern = r"^[A-Za-z0-9](?:[A-Za-z0-9_.:/-]*[A-Za-z0-9])?$"
+EncryptionKeyName = Annotated[str, Field(pattern=encryptionKeyNamePattern, min_length=1, max_length=256)]
 
 
 _tagBody = r"[a-z0-9]+(?:_[a-z0-9]+)*"

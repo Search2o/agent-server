@@ -43,7 +43,8 @@ class ForCommand(CommandExec):
         if isinstance(index_names, str):
             index_names = [index_names]
         max_iterations = executor.param(function, command, command_ns, AgentWords.maxIterations, ExpectedType.intt)
-        if not max_iterations:
+        system_cap = max_iterations is None
+        if system_cap:
             max_iterations = executor.runtime.validation.maxIterationLoops
 
         executor.stream_iter.trace(lambda: f"For loop over a {iterable_kind}, binding {index_names}, "
@@ -56,11 +57,13 @@ class ForCommand(CommandExec):
             except (StopIteration, StopAsyncIteration):
                 break
             if index > max_iterations:
+                if system_cap:
+                    raise ShowMessage(f"For loop iterations greater than the max configured: {max_iterations}. "
+                                      f"Set maxIterations to process only the first items.")
                 break
-            if isinstance(val, tuple):
-                m = min(len(val), len(index_names))
-                for i in range(m):
-                    executor.set_iter(function, index_names[i], val[i])
+            if isinstance(val, tuple) and len(index_names) > 1:
+                for i, name in enumerate(index_names):
+                    executor.set_iter(function, name, val[i] if i < len(val) else None)
             else:
                 executor.set_iter(function, index_names[0], val)
 

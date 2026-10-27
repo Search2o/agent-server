@@ -33,4 +33,7 @@ class LlmAdapter(ABC):
     def get_error(self, req: LlmRequestModel, response: dict[str, JsonValue]) -> str:
         ...
 
+    def forced_tool_choice_problem(self, req: LlmRequestModel) -> str:
+        return ""
+
 

@@ -6,15 +6,46 @@
 from __future__ import annotations
 
 from types import TracebackType
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, TypeAdapter, ValidationError
 
 from search2o.common.exceptions import ShowMessage
+from search2o.common.jsonvalidation import JsonValidator
+from search2o.models.schemaobjects import ContentPartApi, ImagePartApi
 
-from search2o.common.enums import AgentWords
 from search2o.models.prompt import PromptModel, UserEntry, AssistantResponse, ToolResults, \
     PromptElement, TextPart, ImagePart
+
+
+_CONTENT_PART = TypeAdapter(ContentPartApi)
+
+
+def user_parts(val: Any, where: str) -> list[TextPart | ImagePart]:
+    items = val if isinstance(val, list) else [val]
+    parts: list[TextPart | ImagePart] = []
+    for i, item in enumerate(items, 1):
+        at = f"{where} item {i}" if isinstance(val, list) else where
+        if isinstance(item, str):
+            if item:
+                parts.append(TextPart(text=item))
+            continue
+        if not isinstance(item, dict):
+            raise ShowMessage(f"{at} must be text, a content part or a list of them, not {type(item).__name__}.")
+        if item.get("contentType") not in ("text", "image"):
+            raise ShowMessage(f"{at} must be a content part with a contentType of 'text' or 'image', "
+                              f"not {item.get('contentType')!r}: {str(item)[:100]}")
+        try:
+            part = _CONTENT_PART.validate_python(item)
+        except ValidationError as e:
+            raise ShowMessage(f"{at} is not a valid content part: {JsonValidator.error_text(e, item)}")
+        if isinstance(part, ImagePartApi):
+            if not part.mimeType:
+                raise ShowMessage(f"{at} is an image part without a mimeType.")
+            parts.append(ImagePart(contentBase64=part.data, mimeType=part.mimeType))
+        elif part.text:
+            parts.append(TextPart(text=part.text))
+    return parts
 
 
 class PromptHelper:
@@ -26,8 +57,9 @@ class PromptHelper:
 
     def __enter__(self) -> PromptHelper:
         if self._name in self._prompts._acquired:
-            raise ShowMessage(f"The prompt {self._name!r} is already in use by another command. "
-                              f"A nested agent or a tool call must use a different prompt.")
+            raise ShowMessage(f"The prompt {self._name!r} is already in use by another llm command that has not "
+                              f"finished: one in another parallel branch, or the llm command that called this tool. "
+                              f"llm commands running at the same time must use different prompts.")
         self._prompts._acquired.add(self._name)
         self.prompt = self._prompts.get_prompt(self._name)
         self._acquired = True
@@ -70,22 +102,10 @@ class PromptHelper:
         return ue
 
 
-    def add_user(self, val: str | dict | list):
-        if val:
-            if isinstance(val, str):
-                self.get_last_user_entry().entries.append(TextPart(text=val))
-            elif isinstance(val, dict):
-                t = val.get("contentType")
-                if t == "text":
-                    self.add_user(val.get("text"))
-                elif t == "image":
-                    data = val.get("contentBase64")
-                    mt = val.get("mimeType")
-                    if data and mt:
-                        self.get_last_user_entry().entries.append(ImagePart(contentBase64=data, mimeType=mt))
-            elif isinstance(val, list):
-                for v in val:
-                    self.add_user(v)
+    def add_user(self, val: str | list[TextPart | ImagePart]):
+        parts = [TextPart(text=val)] if isinstance(val, str) else val
+        if parts:
+            self.get_last_user_entry().entries.extend(parts)
 
     def add_assistant(self, assistant: AssistantResponse) -> None:
         self.prompt.elements.append(assistant)
@@ -96,25 +116,14 @@ class PromptHelper:
 
 
 class Prompts(BaseModel):
-    prompts: dict[str, "PromptModel"] = Field(default_factory=lambda: Prompts._default_prompts())
+    prompts: dict[str, "PromptModel"] = Field(default_factory=dict)
     _acquired: set[str] = PrivateAttr(default_factory=set)
 
-    @classmethod
-    def _default_prompts(cls) -> dict[str, PromptModel]:
-        name = AgentWords.default.name
-        return {name: PromptModel(name=name)}
-
     def get_prompt(self, name: str) -> PromptModel:
-        if name:
-            prompt = self.prompts.get(name, None)
-            if prompt:
-                return prompt
-            else:
-                prompt = PromptModel(name=name)
-                self.prompts[name] = prompt
-                return prompt
-        else:
-            prompt = self.prompts[AgentWords.default.name]
-            return prompt
+        prompt = self.prompts.get(name)
+        if not prompt:
+            prompt = PromptModel(name=name)
+            self.prompts[name] = prompt
+        return prompt
 
 

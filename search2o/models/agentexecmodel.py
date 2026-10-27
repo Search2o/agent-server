@@ -66,3 +66,19 @@ class FunctionExecModel(BaseModel):
 class AgentExecModel(BaseModel):
     functions: dict[str, FunctionExecModel] = Field(default_factory=dict)
 
+
+    def prompts_used(self) -> set[str]:
+        found: set[str] = set()
+
+        def walk(cl: CommandList | None):
+            for cmd in (cl.commands if cl else []):
+                if cmd.name == CommandName.llm:
+                    found.add(cmd.param("prompt"))
+                for block in cmd.command_blocks.values():
+                    walk(block)
+
+        for fem in self.functions.values():
+            walk(fem.commands)
+            walk(fem.onError)
+        return found
+

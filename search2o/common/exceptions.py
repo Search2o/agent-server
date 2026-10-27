@@ -50,9 +50,9 @@ class LlmError(ShowMessage):
     def message(self) -> str:
         return f"Error in LLM call: {super().message()}"
 
-class InvokedAgentFailed(ErrorInAgent):
-    def user_message(self) -> str:
-        return self.user_m if self.user_m else self.m
+
+class RetryableLlmError(LlmError):
+    ...
 
 
 def error_message(e: BaseException) -> str:

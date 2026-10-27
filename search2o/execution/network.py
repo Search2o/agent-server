@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import re
 import ssl
 from json import JSONDecodeError
@@ -153,6 +154,8 @@ class Network(Closable):
         if content_type == "application/json" or content_type.endswith("+json"):
             try:
                 return res.json()
+            except UnicodeDecodeError:
+                return base64.b64encode(res.content).decode("ascii")
             except JSONDecodeError:
                 return res.text
 
@@ -170,6 +173,8 @@ class Network(Closable):
         # Missing or unknown Content-Type.
         try:
             return res.json()
+        except UnicodeDecodeError:
+            return base64.b64encode(res.content).decode("ascii")
         except JSONDecodeError:
             return res.text
 

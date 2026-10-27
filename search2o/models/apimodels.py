@@ -11,6 +11,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validat
 
 from search2o.common.exceptions import ShowMessage
 from search2o.execution.agent_state import AgentOutput
+from search2o.models.promptmodels import AgentPromptModel
 from search2o.models.schemaobjects import AgentType, AskInputsModel, ValidationResult
 
 
@@ -82,14 +83,17 @@ class DraftResponseModel(BaseResponseModel):
     agentTag: str = Field(default="", title="Agent tag", description="Agent tag used to filter searches.")
     draftUpdatedAt: int = Field(default=0, description="Last time the draft was updated in epoch milliseconds.", json_schema_extra={"format": "int64"}, title="Updated at")
     agentDefinition: AgentType | None = Field(default=None, description="The agent definition, as JSON.", title="Agent definition")
+    agentPrompts: dict[str, AgentPromptModel] = Field(default_factory=dict, description="The prompts the agent will have when this draft is published, by name.", title="Prompts")
     draftAgentHasChanged: bool = Field(default=False, description="Whether the agent has been published by another user, after this draft was created (changes should be merged before the draft can be published).", title="Agent has changed")
     validationQuery: str | None = Field(default=None, description="The query the draft is run against to validate it.", title="Validation query")
     draftCompilationValidated: bool = Field(default=False, description="Whether the draft definition compiles and passed the security checks.", title="Compilation validated")
     draftExecutionValidated: bool = Field(default=False, description="Whether the draft ran successfully against its validation query. Both this and draftCompilationValidated must be true before the draft can be published.", title="Execution validated")
     isNewDraft: bool = Field(default=False, description="Whether this draft is for a new agent rather than an existing one.", title="New draft")
-    usedProfiles: dict[str, list[str]] = Field(default_factory=dict, description="The configuration profiles this draft would use, as profile type to names. It is a hint for writing the agent, and can go out of date as the draft is edited.", title="Used profiles")
+    usedProfiles: dict[str, list[str]] = Field(default_factory=dict, description="The configuration profiles this draft would use, as profile type to names. It is a hint for writing the agent, and can go out of date as the draft is edited.", title="Profiles for the AI to use")
     maxTime: int | None = Field(default=None, title="Max run time (seconds)", description="Seconds a run of this draft's agent may take before it is stopped.")
     maxCost: float | None = Field(default=None, title="Max LLM cost per run (US dollars)", description="US dollars of LLM spend a run of this draft's agent may reach before it is stopped.")
+    const: str = Field(default="", title="Const", description="The agent's const as a plaintext JSON object string, decrypted for the editor. Empty when unset. Exposed to the agent as the read-only 'const' namespace.")
+    constError: str = Field(default="", exclude_if=lambda value: not value, title="Const error", description="Set when the stored const could not be decrypted, with the reason. const is then empty, and saving a const replaces the stored one.")
 
 
 AskBlocks = dict[str, dict[str, Any] | AskInputsModel]

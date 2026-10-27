@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://search2o.com">
-    <img src="https://search2o.com/images/og5.png" alt="Search2o: a platform to build, run, and use AI agents, with a search interface" width="600">
+    <img src="https://search2o.com/images/og6.png" alt="Search2o: a platform to build, run, and use AI agents, with a search interface" width="600">
   </a>
 </p>
 
@@ -23,7 +23,14 @@ Install the agent server with the bundled GUI:
 pip install search2o
 ```
 
-This GitHub repository holds the agent server without the GUI; the GUI source is at [github.com/Search2o/ui](https://github.com/Search2o/ui).
+To install from the source instead, clone the agent server and install it from the clone. The clone does not include the GUI:
+
+```bash
+git clone https://github.com/Search2o/agent-server.git
+pip install -e agent-server
+```
+
+To install the GUI from the source, follow the instructions in the README of the [GUI repository](https://github.com/Search2o/ui).
 
 ### 3. Run the server
 

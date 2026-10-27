@@ -28,7 +28,7 @@ class AskCommand(CommandExec):
                 ai = AskInputModel.model_validate(item)
                 new_list.append(ai)
             except ValidationError as e:
-                raise ShowMessage(f"Error in inputs in the {CommandName.ask} command: {JsonValidator.format_validation_error(e)}")
+                raise ShowMessage(f"Error in inputs in the {CommandName.ask} command: {JsonValidator.error_text(e, item)}")
 
         inputs = AskInputsModel(inputs=new_list, message=message)
         if node:

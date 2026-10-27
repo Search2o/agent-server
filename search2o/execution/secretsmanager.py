@@ -20,6 +20,7 @@ class SecretsManager:
         self._model = model
         self._cache = cache
         self._fetched: dict[str, str] = {}
+        self._failed: dict[str, ShowMessage] = {}
 
     def __getitem__(self, name: str) -> str:
         if not name:
@@ -30,6 +31,8 @@ class SecretsManager:
         if cached is not None:
             return cached
         if self._model.secretSource == SecretSource.vault:
+            if name in self._failed:
+                raise self._failed[name]
             raise ShowMessage(f"Secret {name!r} was not fetched before the agent ran, and a vault secret cannot be "
                               f"read while it runs.")
         return self._keep(name, self._read_local(name))
@@ -44,8 +47,8 @@ class SecretsManager:
                 continue
             try:
                 self._fetched[name] = self._keep(name, await self.fetch(name))
-            except ShowMessage:
-                pass
+            except ShowMessage as e:
+                self._failed[name] = e
 
     async def fetch(self, name: str) -> str:
         if self._model.secretSource == SecretSource.vault:

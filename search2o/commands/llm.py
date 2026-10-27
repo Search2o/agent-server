@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import Request
@@ -16,8 +18,8 @@ from pydantic import JsonValue
 from search2o.execution.hooks import Hooks
 from search2o.common.enums import AgentWords, TraceType
 from search2o.common.epoch import Epoch
-from search2o.common.exceptions import AGENT_PROBLEM, ShowMessage, LlmError, error_message
-from search2o.common.flowcontrol import AgentDone, FailCommandException, AgentStopped
+from search2o.common.exceptions import AGENT_PROBLEM, ShowMessage, LlmError, RetryableLlmError, error_message
+from search2o.common.flowcontrol import AgentDone, FailCommandException, AgentStopped, CostLimitExceeded
 from search2o.common.mtimeout import m_timeout
 from search2o.common.mylogger import MyLogger
 from search2o.common.sensitivestring import SensitiveString
@@ -27,23 +29,30 @@ from search2o.common.typechecker import ExpectedType
 from search2o.common.urlquery import split_query
 from search2o.execution.agent_executor import AgentExecutor, AskException, CommandExec, FunctionFrame, CommandInvocation
 from search2o.execution.llmresponse import LlmResponse
-from search2o.execution.prompts import PromptHelper
+from search2o.execution.prompts import PromptHelper, user_parts
 from search2o.execution.statenodes import LlmCommandNode
 from search2o.llm.llmcontext import LlmContext
 from search2o.llm.schemabuilder import SchemaBuilder
 from search2o.mcpclient.mcp import Mcp
 from search2o.models.agentexecmodel import CommandExecModel
 from search2o.models.prompt import LlmRequestModel, AgentFunctionModel, AssistantResponse, ToolCalls, ToolResults, ToolResult, \
-    ContentOutput, LlmResponseModel, ToolChoiceModel, UserEntry
+    ContentOutput, LlmResponseModel, ToolChoiceModel, UserEntry, PromptModel
 from search2o.models.schemaobjects import CommandName
 from search2o.models.systemconfig import LlmModel
+
+
+_RETRY_BACKOFF_SECONDS = 1
 
 
 class LlmCommand(CommandExec):
     @staticmethod
     async def get_prompt_name(task: FunctionFrame, command: CommandExecModel, executor: AgentExecutor, command_ns: SimpleNamespace) -> str:
         name = executor.param(task, command, command_ns, AgentWords.prompt, ExpectedType.strt)
-        return name if name else AgentWords.default.value
+        if not name:
+            raise ShowMessage(f"The {CommandName.llm} command must name a prompt.")
+        if name not in executor.agent_prompts:
+            raise ShowMessage(f"The prompt {name!r} does not exist. Add it to the agent's prompts.")
+        return name
 
     @staticmethod
     async def get_mcp(task: FunctionFrame, executor: AgentExecutor, mcp_name: str, path: str) -> Mcp:
@@ -118,7 +127,7 @@ class LlmCommand(CommandExec):
                     executor.stream_iter.trace(lambda: f"Tool {task_name!r} returned a value that is not JSON. "
                                                        f"It is sent to the LLM as text, so its structure is lost.", TraceType.error)
             return ToolResponse(success=True, response={ "result": str(resp) })
-        except (AgentStopped, AskException, FailCommandException):
+        except (AgentStopped, CostLimitExceeded, AskException, FailCommandException):
             raise
         except AgentDone:
             raise ShowMessage(f"{CommandName.end} command is not allowed inside tool calls.")
@@ -166,7 +175,8 @@ class LlmCommand(CommandExec):
         max_tool_call_loops = executor.param(function, command, command_ns, AgentWords.maxToolCallLoops, ExpectedType.intt)
         output_format = executor.param(function, command, command_ns, AgentWords.outputFormat, ExpectedType.strt)
 
-        with PromptHelper(executor.prompts, prompt_name) as prompt_helper:
+        meta = executor.agent_prompts[prompt_name]
+        with PromptHelper(executor.prompt_store(meta.scope), prompt_name) as prompt_helper:
             prompt = prompt_helper.prompt
 
             tool_call_count = node.toolCallCount if node else 0
@@ -177,14 +187,33 @@ class LlmCommand(CommandExec):
                 nof_prompt_elements = node.elementCount
             else:
                 nof_prompt_elements = len(prompt.elements)
+            user_empty = False
             try:
+                if not node:
+                    meta_path = f"{AgentWords.prompts}.{prompt_name}"
+                    system = await executor.eval_expr(function, path, meta.system, ExpectedType.strt, f"{meta_path}.{AgentWords.system}")
+                    user = await executor.eval_expr(function, path, meta.user, ExpectedType.anyt, f"{meta_path}.{AgentWords.user}")
+                    parts = user_parts(user, f"{meta_path}.{AgentWords.user}") if user is not None else []
+                    user_empty = not parts
+                    if meta.system is not None:
+                        prompt_helper.set_system(system)
+                    prompt_helper.add_user(parts)
+                    executor.stream_iter.trace(lambda: f"Prompt {prompt_name!r} ({meta.scope})"
+                                                       + (f", system = {str(system)[:500]!r}" if meta.system is not None else "")
+                                                       + (f", user = {str(user)[:500]!r}" if user else ""), TraceType.input, path)
                 llmreq: LlmRequestModel = LlmRequestModel(prompt=prompt)
                 context = self.get_context(executor, llm_name)
                 model_config = context.llm
                 await self.set_tools_and_tasks(function, command, executor, llmreq, model_config, command_ns, path)
+                if user_empty and (not prompt.elements or not (llmreq.agentFunctions or llmreq.mcpTools or llmreq.vendorTools)):
+                    raise ShowMessage(f"The user value of the prompt {prompt_name!r} is empty.")
                 if output_format == AgentWords.structured and (llmreq.agentFunctions or llmreq.mcpTools):
                     llmreq.toolChoice = ToolChoiceModel(type="any")
                 await self.set_dynamic_config(function, command, executor, llmreq, model_config, llm_name, command_ns, path)
+                if llmreq.toolChoice and llmreq.toolChoice.type == "any":
+                    problem = context.adapter.forced_tool_choice_problem(llmreq)
+                    if problem:
+                        raise ShowMessage(f"Structured output cannot be used with the profile {llm_name!r}: {problem}")
 
                 while tool_call_count < max_tool_call_loops:
                     if node:
@@ -200,13 +229,12 @@ class LlmCommand(CommandExec):
                                     "userEmail": executor.user_email, "profile": llm_name,
                                     "isValidation": executor.run.is_validation_run, **more}
                         await Hooks.guard("beforeLlmCall", lambda: hook_args(request=llmreq.model_dump(mode="json")))
-                        llm_start_time = Epoch.ms()
                         llmres = await self.call_llm(executor.request, llmreq, context,
                                                        executor.runtime.network.get_pool(context.llm.connectionPoolName),
                                                        executor.agent_name, executor.agent_version,
-                                                       executor.convid, timeout)
+                                                       executor.convid, timeout,
+                                                       lambda res, start: executor.add_llm_result(llm_name, llmreq.model, res, start))
                         await Hooks.guard("afterLlmCall", lambda: hook_args(response=llmres.model_dump(mode="json")))
-                        executor.add_llm_result(llm_name, llmreq.model, llmres, llm_start_time)
                         executor.stream_iter.trace(lambda: f"LLM call completed. LLM tokens: "
                                                    f"input text tokens = {llmres.inputTextTokens}, "
                                                    f"input image tokens = {llmres.inputImageTokens}, "
@@ -279,6 +307,7 @@ class LlmCommand(CommandExec):
                         tool_call_count += 1
                     elif isinstance(asst.response, ContentOutput):
                         got_asst_response = True
+                        self.drop_tool_calls(prompt, nof_prompt_elements)
                         executor.stream_iter.trace(lambda: f"LLM returned content: {asst.response.model_dump_json(indent=2, exclude_none=True)}", TraceType.output, inv.path)
                         if stream_output:
                             executor.add_output_part(LlmResponse(llmres))
@@ -291,6 +320,14 @@ class LlmCommand(CommandExec):
                         nof_prompt_elements -= 1
                     del prompt.elements[nof_prompt_elements:]
 
+    @staticmethod
+    def drop_tool_calls(prompt: PromptModel, start: int) -> None:
+        added = prompt.elements[start:]
+        first = next((i for i, e in enumerate(added)
+                      if isinstance(e, AssistantResponse) and isinstance(e.response, ToolCalls)), None)
+        if first is not None:
+            del prompt.elements[start + first:-1]
+
     @classmethod
     async def call_llm(
             cls,
@@ -302,17 +339,21 @@ class LlmCommand(CommandExec):
             agent_version: int,
             convid: str,
             timeout: float | None,
+            charge: Callable[[LlmResponseModel, int], None],
     ) -> LlmResponseModel:
         attempts = max(1, req.retries + 1)
 
         llm_response: LlmResponseModel | None = None
+        js = context.adapter.process_request(req)
 
         for attempt in range(attempts):
             is_last_attempt = attempt == attempts - 1
 
             try:
-                response = await cls._send_llm_request(context, client, req, timeout)
+                start_time = Epoch.ms()
+                response = await cls._send_llm_request(context, client, req, js, timeout)
                 llm_response = cls._read_llm_response(context, req, response)
+                charge(llm_response, start_time)
                 problem = cls._structured_args_problem(req, llm_response)
                 if problem:
                     llm_response.did_succeed = False
@@ -325,9 +366,10 @@ class LlmCommand(CommandExec):
                 if not llm_response.should_retry:
                     break
 
-            except LlmError:
+            except RetryableLlmError:
                 if is_last_attempt:
                     raise
+                await asyncio.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
 
             if is_last_attempt:
                 break
@@ -364,16 +406,15 @@ class LlmCommand(CommandExec):
             context: LlmContext,
             client: AsyncClient,
             req: LlmRequestModel,
+            js: dict[str, Any],
             timeout: float | None,
     ):
         try:
-            js = context.adapter.process_request(req)
-
             async with m_timeout(timeout):
                 return await client.post(req.url, headers=req.headers, params=req.queryParams, json=js)
 
         except TimeoutError:
-            raise LlmError(
+            raise RetryableLlmError(
                 f"LLM call to {context.llm.name} ({req.model}) failed. "
                 f"Timed out after {timeout} seconds."
             )
@@ -383,7 +424,7 @@ class LlmCommand(CommandExec):
             MyLogger.error(message)
             from search2o.common.rest_call import RestCall
             RestCall.report_error_once("An LLM call could not connect.")
-            raise LlmError(message)
+            raise RetryableLlmError(message)
 
 
     @classmethod
@@ -394,7 +435,8 @@ class LlmCommand(CommandExec):
             response: Response,
     ) -> LlmResponseModel:
         if response.status_code != 200:
-            raise LlmError(
+            error_class = RetryableLlmError if response.status_code == 429 or response.status_code >= 500 else LlmError
+            raise error_class(
                 f"LLM call to {context.llm.name} ({req.model}) failed. "
                 f"Error message from the LLM: {cls._read_llm_error(context, req, response)}"
             )
@@ -413,6 +455,9 @@ class LlmCommand(CommandExec):
     @classmethod
     def _read_llm_error(cls, context: LlmContext, req: LlmRequestModel, response: Response) -> str:
         try:
-            return context.adapter.get_error(req, response.json())
+            body = response.json()
+            if not isinstance(body, dict):
+                raise ValueError("not a JSON object")
+            return context.adapter.get_error(req, body)
         except ValueError:
             return f"HTTP {response.status_code}: {response.text[:500]}"

@@ -4,7 +4,7 @@
 # See the LICENSE.md file and https://search2o.com/legal/license.html.
 
 import asyncio
-from typing import Annotated, Self
+from typing import Annotated, Any, Self
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, EmailStr, Field, JsonValue, model_validator
@@ -24,7 +24,8 @@ from search2o.execution.runref import RunRef
 from search2o.execution.runtime import Runtime, RuntimeState
 from search2o.execution.secretsmanager import SecretsManager
 from search2o.execution.streamiter import StreamIter, StreamDraftReturn
-from search2o.models.configtypes import AgentName, AgentTag, AgentMaxTime, AgentMaxCost
+from search2o.models.configtypes import AgentName, AgentTag, AgentMaxTime, AgentMaxCost, SafeName
+from search2o.models.promptmodels import AgentPromptModel
 from search2o.models.apimodels import AgentTitle, BaseResponseModel, \
     DraftResponseModel, EmptyRequestModel, PagedRequestModel, ReportWindow, RequestModel, SearchQuery, \
     ValidateDraftResponseModel
@@ -37,6 +38,30 @@ dev_router = APIRouter(prefix="/api/dev", tags=["dev"])
 def _check_definition_length(definition: AgentType | None) -> None:
     if definition and len(definition) > Runtime.current().validation.agentMaxLength:
         raise ShowMessage(f"Agent definition has to be less than {Runtime.current().validation.agentMaxLength} characters, including comments.")
+
+
+_MAX_ENCRYPTED_CONST = 50_000
+
+
+async def _encrypt_const(request: Request, dump: dict) -> dict:
+    if dump.get("const"):
+        encrypted = await Encryptor.encrypt_str(request, dump["const"])
+        if len(encrypted) > _MAX_ENCRYPTED_CONST:
+            raise ShowMessage(f"The const is too long. Encrypted, it is {len(encrypted):,} characters, over the "
+                              f"{_MAX_ENCRYPTED_CONST:,} that can be stored. Encryption adds about a third, more "
+                              f"for characters outside ASCII.")
+        dump["const"] = encrypted
+    return dump
+
+
+async def _decrypt_const(request: Request, ret: dict[str, Any]) -> None:
+    const = ret.get("const")
+    ret["const"] = ""
+    if isinstance(const, str) and const:
+        try:
+            ret["const"] = await Encryptor.decrypt_str(request, const)
+        except Exception as e:
+            ret["constError"] = f"The stored const could not be decrypted: {error_message(e)}"
 
 
 # ----- request models shared by several endpoints -----
@@ -90,6 +115,7 @@ class AgentResponseModel(BaseResponseModel):
     agentTitle: str = Field(..., description="Title of the agent.")
     agentTag: str = Field(..., title="Agent tag", description="Agent tag used to filter searches.")
     agentDefinition: AgentType = Field(..., description="Agent definition in JSON.")
+    agentPrompts: dict[str, AgentPromptModel] = Field(default_factory=dict, title="Prompts", description="The agent's prompts, by name. They are not versioned: a past version is returned without them.")
     hasPastVersions: bool = Field(..., description="Whether this agent has past versions in the last three months.")
     lastUpdatedByName: str = Field(..., description="Name of the user who last updated the agent definition.")
     lastUpdatedByEmail: str = Field(..., description="Email of the user who last updated the agent definition.")
@@ -98,11 +124,11 @@ class AgentResponseModel(BaseResponseModel):
     isLocked: bool = Field(False, title="Is Locked", description="Whether the agent is locked, which means an indexing job is running against it.")
     memoryLabels: list[str] = Field(default_factory=list, title="Memory labels",
                                     description="The labels this agent stores memories under. Deleting the agent deletes every user's memories under these labels.")
-    invokedBy: list[str] = Field(default_factory=list, title="Invoked by",
-                                 description="The published agents that invoke this agent. The agent cannot be deleted while this is not empty.")
     descriptor: DescriptorModel = Field(default_factory=DescriptorModel, title="Descriptor", description="What the agent does, which is what a search matches a user's query against. Empty when the agent has no descriptor.")
     maxTime: int | None = Field(default=None, title="Max run time (seconds)", description="Seconds a run of this agent may take before it is stopped.")
     maxCost: float | None = Field(default=None, title="Max LLM cost per run (US dollars)", description="US dollars of LLM spend a run of this agent may reach before it is stopped.")
+    const: str = Field(default="", title="Const", description="The agent's const as a plaintext JSON object string, decrypted for the editor. Empty when unset. Exposed to the agent as the read-only 'const' namespace.")
+    constError: str = Field(default="", exclude_if=lambda value: not value, title="Const error", description="Set when the stored const could not be decrypted, with the reason. const is then empty, and saving a const replaces the stored one.")
     lastChanged: int | None = Field(default=None, title="Last changed", description="When anything an agent server uses about this agent last changed - its definition, title, tag or run limits - in epoch milliseconds.", json_schema_extra={"format": "int64"})
     descriptorVersion: int = Field(default=0, title="Descriptor version", description="Version of the descriptor, in epoch milliseconds. Send it back with publishDescriptor. It is 0 when the agent has no descriptor.", json_schema_extra={"format": "int64"})
     lastDescriptorUpdatedByName: str | None = Field(default=None, title="Descriptor last updated by", description="Name of the user who last updated the descriptor.")
@@ -152,13 +178,15 @@ class SaveDraftNewModel(RequestModel):
     usedProfiles: dict[str, list[str]] | None = Field(default=None, description="The configuration profiles this draft would use, as profile type to names. It is a hint for writing the agent, and can go out of date as the draft is edited. Omit to leave unchanged.")
     maxTime: AgentMaxTime | None = Field(default=None, description="Seconds a run of this agent may take before it is stopped. Omit to leave unchanged.")
     maxCost: AgentMaxCost | None = Field(default=None, description="US dollars of LLM spend a run of this agent may reach before it is stopped. Omit to leave unchanged.")
+    agentPrompts: dict[SafeName, AgentPromptModel] | None = Field(default=None, description="The agent's prompts, by name. Each llm command names one of them. This replaces all of the draft's prompts. Omit to leave unchanged.")
+    const: str | None = Field(default=None, max_length=_MAX_ENCRYPTED_CONST, description="The agent's const, as a plaintext JSON object string. The agent server encrypts it before storing. It is decrypted to a JSON object and exposed to the agent as the read-only 'const' namespace. Omit to leave unchanged; '' to clear.")
 
 
 @dev_router.post("/saveDraftNew", response_model=BaseResponseModel, summary="Update a draft for a new agent",
                  description="Updates a draft that is not yet a published agent, where the name and tag are still the developer's to choose. Only draftid is required: any field left out keeps its current value.")
 async def saveDraftNew(item: SaveDraftNewModel, request: Request) -> BaseResponseModel:
     _check_definition_length(item.agentDefinition)
-    ret = await RestCall.passthrough(request, item.model_dump())
+    ret = await RestCall.passthrough(request, await _encrypt_const(request, item.model_dump()))
     return BaseResponseModel.model_validate(ret)
 
 
@@ -170,13 +198,15 @@ class SaveDraftAgentModel(RequestModel):
     usedProfiles: dict[str, list[str]] | None = Field(default=None, description="The configuration profiles this draft would use, as profile type to names. It is a hint for writing the agent, and can go out of date as the draft is edited. Omit to leave unchanged.")
     maxTime: AgentMaxTime | None = Field(default=None, description="Seconds a run of this agent may take before it is stopped. Omit to leave unchanged.")
     maxCost: AgentMaxCost | None = Field(default=None, description="US dollars of LLM spend a run of this agent may reach before it is stopped. Omit to leave unchanged.")
+    agentPrompts: dict[SafeName, AgentPromptModel] | None = Field(default=None, description="The agent's prompts, by name. Each llm command names one of them. This replaces all of the draft's prompts. Omit to leave unchanged.")
+    const: str | None = Field(default=None, max_length=_MAX_ENCRYPTED_CONST, description="The agent's const, as a plaintext JSON object string. The agent server encrypts it before storing. It is decrypted to a JSON object and exposed to the agent as the read-only 'const' namespace. Omit to leave unchanged; '' to clear.")
 
 
 @dev_router.post("/saveDraftAgent", response_model=BaseResponseModel, summary="Update a draft of an existing agent",
                  description="Updates a draft taken from a published agent. The name and tag belong to the agent and cannot be changed here. Only draftid is required: any field left out keeps its current value.")
 async def saveDraftAgent(item: SaveDraftAgentModel, request: Request) -> BaseResponseModel:
     _check_definition_length(item.agentDefinition)
-    ret = await RestCall.passthrough(request, item.model_dump())
+    ret = await RestCall.passthrough(request, await _encrypt_const(request, item.model_dump()))
     return BaseResponseModel.model_validate(ret)
 
 
@@ -211,15 +241,22 @@ async def draftHelp(item: DraftHelpModel, request: Request) -> DraftHelpResponse
 @dev_router.post("/getDraft", response_model=DraftResponseModel, summary="Get a draft agent", description="Get a draft agent.")
 async def getDraft(item: DraftidModel, request: Request) -> DraftResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
+    await _decrypt_const(request, ret)
     return DraftResponseModel.model_validate(ret)
+
+
+class PublishDraftModel(DraftidModel):
+    overwrite: bool = Field(default=False, description="Replace the agent's title, run limits and prompts with the draft's even if they were changed on the agent after the draft was made from it.")
 
 
 class PublishDraftResponseModel(BaseResponseModel):
     isIndexed: bool = Field(default=False, description="Whether the published agent is currently in the search index.")
+    didMetaChange: bool = Field(default=False, description="True when the publish was refused because the agent's title, run limits or prompts were changed after the draft was made from it. Publish again with overwrite to replace them with the draft's.")
+    metaFieldsChanged: list[str] = Field(default_factory=list, description="With didMetaChange, the fields that differ between the draft and the agent: agentTitle, maxTime, maxCost, and agentPrompts.<name> for each prompt.")
 
 
-@dev_router.post("/publishDraft", response_model=PublishDraftResponseModel, summary="Publish a draft agent", description="This publishes the draft agent to the system.")
-async def publishDraft(item: DraftidModel, request: Request) -> PublishDraftResponseModel:
+@dev_router.post("/publishDraft", response_model=PublishDraftResponseModel, summary="Publish a draft agent", description="This publishes the draft agent to the system. It returns success false with didMetaChange when the agent's title, run limits or prompts were changed after the draft was made and overwrite is off.")
+async def publishDraft(item: PublishDraftModel, request: Request) -> PublishDraftResponseModel:
     name = ""
     if Hooks.has("onAgentPublish"):
         draft = await RestCall.passthrough_method(request, "getDraft", {"draftid": item.draftid})
@@ -249,7 +286,7 @@ async def deleteDraft(item: DeleteDraftModel, request: Request) -> BaseResponseM
 
 
 class GetDraftListModel(PagedRequestModel):
-    limit: int = Field(default=10, ge=1, le=25, description="The maximum number of results to return.")
+    limit: int = Field(default=10, ge=1, le=1000, description="The maximum number of results to return.")
 
 
 @dev_router.post("/getDraftList", response_model=GetAllDraftsResponseModel, summary="Get draft list",
@@ -283,6 +320,7 @@ async def getAgent(item: AgentNameModel, request: Request) -> AgentResponseModel
             ret["descriptor"] = DescriptorModel(description="Decryption error")
     elif isinstance(descriptor, str):
         ret["descriptor"] = DescriptorModel()
+    await _decrypt_const(request, ret)
     return AgentResponseModel.model_validate(ret)
 
 
@@ -459,10 +497,10 @@ class ProfileInfoModel(BaseModel):
 
 
 class ProfilesResponseModel(BaseResponseModel):
-    profiles: dict[str, list[ProfileInfoModel]] = Field(default_factory=dict, description="The configured profiles, grouped by type: llm, api, mcp, db and prompt. Each entry carries the profile's name and its documentation.")
+    profiles: dict[str, list[ProfileInfoModel]] = Field(default_factory=dict, description="The configured profiles, grouped by type: llm, api, mcp and db. Each entry carries the profile's name and its documentation.")
 
 
-@dev_router.post("/getProfiles", response_model=ProfilesResponseModel, summary="Get the configured profiles", description="Gets every configured profile, grouped by type (llm, api, mcp, db, prompt), each with its name and documentation. A profile that reads a secret this agent server cannot find is left out. Useful when writing agents that reference profiles.")
+@dev_router.post("/getProfiles", response_model=ProfilesResponseModel, summary="Get the configured profiles", description="Gets every configured profile, grouped by type (llm, api, mcp, db), each with its name and documentation. A profile that reads a secret this agent server cannot find is left out. Useful when writing agents that reference profiles.")
 async def getProfiles(item: EmptyRequestModel, request: Request) -> ProfilesResponseModel:
     ret = await RestCall.passthrough(request, item.model_dump())
     runtime = Runtime.current()
@@ -499,6 +537,7 @@ class DraftValidation(BaseModel):
     validationResults: ValidationResults = Field(default_factory=ValidationResults)
     configUpdatedAt: int = Field(default=0)
     draftAgentDefinition: AgentType | None = Field(default=None)
+    agentPrompts: dict[str, dict] = Field(default_factory=dict)
     maxTime: int | None = Field(default=None)
     maxCost: float | None = Field(default=None)
     convid: str
@@ -520,27 +559,36 @@ async def _environment_problems(results: list[ValidationResult], runtime: Runtim
 async def _validate_draft_internal(item: ValidateDraftModel, request: Request, stream_iter: StreamIter | None,
                                 run_ref: RunRef | None = None)-> ValidateDraftResponseModel:
     vr = ValidateDraftResponseModel(draftid=item.draftid, validationSuccess=False) # This enforces access
-    if Hooks.errors:
-        vr.runtimeError = HOOKS_NOT_LOADED
-        return vr
-    stream_iter.trace(lambda: "Looking for compile errors and security checks on python expressions", TraceType.flow)
+    started: RuntimeState | None = None
     try:
+        if Hooks.errors:
+            vr.runtimeError = HOOKS_NOT_LOADED
+            return vr
+        stream_iter.trace(lambda: "Looking for compile errors and security checks on python expressions", TraceType.flow)
         validate_response = DraftValidation.model_validate(await RestCall.call_method(request, "validateDraft", {"draftid": item.draftid}))
         results = validate_response.validationResults.results
         vr.validationErrors = [r for r in results if r.vtype == ValidationResultType.error]
         if vr.validationErrors:
             runtime = Runtime.current()
         else:
-            runtime = await Runtime.start_agent_exec(request, validate_response.configUpdatedAt, validate_response.convid)
+            runtime = started = await Runtime.start_agent_exec(request, validate_response.configUpdatedAt, validate_response.convid)
         vr.validationErrors += await _environment_problems(results, runtime)
         if not vr.validationErrors:
             stream_iter.trace(lambda: "No compile errors and security concerns. Running the agent against the validation query", TraceType.flow)
             draft = DraftResponseModel.model_validate(await RestCall.passthrough_method(request, "getDraft", {"draftid": item.draftid})) # Same object includes both
-            if draft.validationQuery:
+            const = {}
+            try:
+                const = await AgentExec.decrypt_const(request, runtime, draft.draftName, draft.const)
+            except ShowMessage as e:
+                vr.validationErrors.append(ValidationResult(vtype=ValidationResultType.error, path="const", detail=e.message()))
+            vr.validationErrors += [ValidationResult(vtype=r.vtype, path=r.path, detail=f"{r.detail!r} is not in the agent's const.")
+                                    for r in results if r.vtype == ValidationResultType.constItem and r.detail not in const]
+            if not vr.validationErrors and draft.validationQuery:
                 agent_exec = AgentExec.create_for_draft(draft.draftName, draft.agentTitle,
                                                         validate_response.draftAgentDefinition,
                                                         validate_response.maxTime, validate_response.maxCost,
-                                                        [r.detail for r in results if r.vtype == ValidationResultType.secret])
+                                                        [r.detail for r in results if r.vtype == ValidationResultType.secret],
+                                                        validate_response.agentPrompts, const)
                 if item.followup:
                     convid = validate_response.convid
                     state = (await RestCall.get_state(request, convid)).text
@@ -575,7 +623,7 @@ async def _validate_draft_internal(item: ValidateDraftModel, request: Request, s
                     stream_iter.trace(lambda: f"Agent responded with error message: {earm.error.message if earm.error else ''}", TraceType.error)
                     vr.error = earm.error
                     vr.runtimeError = earm.error.message if earm.error else None
-            else:
+            elif not vr.validationErrors:
                 vr.runtimeError = "Must specify a query to validate a draft."
     except Exception as exc:
         detail = SensitiveString.safe_text(str(exc))
@@ -583,6 +631,8 @@ async def _validate_draft_internal(item: ValidateDraftModel, request: Request, s
         vr.validationErrors.append(ValidationResult(vtype=ValidationResultType.error,
                                                     detail=f"Unexpected error: {name}: {detail}" if detail else f"Unexpected error: {name}"))
     finally:
+        if started:
+            started.done(validate_response.convid)
         stream_iter.done_draft(vr)
     return vr
 

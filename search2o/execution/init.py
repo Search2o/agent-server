@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from search2o.common.exceptions import error_message
 from search2o.common.mylogger import MyLogger
 from search2o.common.rest_call import RestCall
@@ -42,10 +44,7 @@ class Init:
         from search2o.commands.whilev import WhileCommand
         from search2o.commands.end import EndCommand
         from search2o.commands.forv import ForCommand
-        from search2o.commands.invoke import InvokeCommand
         from search2o.commands.log import LogCommand
-        from search2o.commands.prompt import PromptCommand
-        from search2o.commands.search import SearchCommand
         from search2o.commands.trace import TraceCommand
         from search2o.commands.var import VarCommand
 
@@ -57,11 +56,6 @@ class Init:
 
             # LLM commands
             CommandName.llm: LlmCommand(),
-            CommandName.prompt: PromptCommand(),
-
-            # Deep agents
-            CommandName.search: SearchCommand(),
-            CommandName.invoke: InvokeCommand(),
 
             # HITL
             CommandName.ask: AskCommand(),
@@ -100,6 +94,8 @@ class Init:
 
     @classmethod
     async def close_all(cls):
+        await Runtime.stop_tasks(Config.init_model.agentServer.shutdownGrace)
+        await asyncio.gather(*RestCall._report_tasks, return_exceptions=True)
         if cls.started:
             await RestCall.report_server_event("shutdown")
             try:

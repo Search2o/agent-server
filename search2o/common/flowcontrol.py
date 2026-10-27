@@ -32,6 +32,15 @@ class AgentStopped(FlowControlException):
     pass
 
 
+class CostLimitExceeded(FlowControlException):
+    def __init__(self, message: str, user_message: str):
+        self.message = message
+        self.user_message = user_message
+
+    def __str__(self) -> str:
+        return self.message
+
+
 
 class FailCommandException(FlowControlException):
     def __init__(self, message: Any, path: str = ""):

@@ -25,13 +25,10 @@ class CommandName(StrEnum):
     api = auto()
     db = auto()
 
-    prompt = auto()
     llm = auto()
     memory = auto()
 
     ask = auto()
-    search = auto()
-    invoke = auto()
     parallel = auto() # Runs several functions concurrently
 
     func = auto()
@@ -54,8 +51,8 @@ class CommandName(StrEnum):
 
 
 RESULT_PRODUCING_COMMANDS = frozenset({
-    CommandName.api, CommandName.db, CommandName.llm, CommandName.search,
-    CommandName.invoke, CommandName.func, CommandName.ask, CommandName.memory,
+    CommandName.api, CommandName.db, CommandName.llm,
+    CommandName.func, CommandName.ask, CommandName.memory,
     CommandName.parallel,
 })
 
@@ -67,6 +64,7 @@ class ReadOnlyVariable(StrEnum):
     sys = auto()
     agent = auto()
     conv = auto()
+    const = auto()
 
 
 class VarNamespace(StrEnum):
@@ -120,6 +118,7 @@ class ValidationResultType(StrEnum):
     error = "error"
     secret = "secret"
     allowlistItem = "allowlistItem"
+    constItem = "constItem"
 
 
 class ValidationResult(BaseModel):
@@ -142,17 +141,12 @@ class TextPartApi(BaseModel):
     text: str = Field(..., title="Text", description="The text of this part, treated as markdown.")
 
 
-class HtmlPartApi(BaseModel):
-    contentType: Literal["html"] = Field(default="html", title="Content type", description="Identifies this part as HTML.")
-    text: str = Field(..., title="HTML", description="The HTML of this part.")
-
-
 class ImagePartApi(BaseModel):
     contentType: Literal["image"] = Field(default="image", title="Content type", description="Identifies this part as an image.")
-    text: str = Field(..., title="Image data", description="The image, base64 encoded.")
+    data: str = Field(..., title="Image data", description="The image, base64 encoded.")
     mimeType: str = Field(default="", title="MIME type", description="The image's MIME type, such as image/png.")
 
-type ContentPartApi = Annotated[TextPartApi | HtmlPartApi | ImagePartApi, Field(discriminator="contentType")]
+type ContentPartApi = Annotated[TextPartApi | ImagePartApi, Field(discriminator="contentType")]
 
 TYPE_EXPR_PATTERN = (
     r"^(?:"
@@ -236,6 +230,8 @@ class AuditEntryType(StrEnum):
     failedSignIns = "failedSignIns"
     titleUpdated = "titleUpdated"
     budgetUpdated = "budgetUpdated"
+    agentPublished = "agentPublished"
+    promptsUpdated = "promptsUpdated"
     unknownPasswordReset = "unknownPasswordReset"
     agentServer = "agentServer"
     servers = auto()
@@ -253,4 +249,3 @@ class AuditEntryType(StrEnum):
     api = auto()
     mcp = auto()
     db = auto()
-    prompt = auto()

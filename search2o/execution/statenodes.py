@@ -24,14 +24,6 @@ class IfCommandNode(CommandNode):
     ntype: Literal["if"] = "if"
     condValue: bool
 
-class InvokeCommandNode(CommandNode):
-    ntype: Literal["invoke"] = "invoke"
-    inputs: dict[str, Any]
-    agent_name: str
-    agent_version: int
-    share_prompts: bool
-    nodes: list[NodeUnion]
-
 class WhileCommandNode(CommandNode):
     ntype: Literal["while"] = "while"
     cnt: int
@@ -73,7 +65,6 @@ class FunctionNode(Node): # Any function name
 NodeUnion: TypeAlias = Annotated[
     CommandNode
     | IfCommandNode
-    | InvokeCommandNode
     | WhileCommandNode
     | AskCommandNode
     | FuncCommandNode
@@ -84,4 +75,4 @@ NodeUnion: TypeAlias = Annotated[
     Field(discriminator="ntype"),
 ]
 
-InvokeCommandNode.model_rebuild()
+ParallelCommandNode.model_rebuild()

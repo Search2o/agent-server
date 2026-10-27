@@ -12,7 +12,7 @@ from starlette.responses import StreamingResponse
 from search2o.execution.conversationrun import ConversationRun, ExecStartResponseModel
 from search2o.execution.hooks import Hooks
 from search2o.common.rest_call import RestCall
-from search2o.common.exceptions import ErrorFromCloudException
+from search2o.common.exceptions import ErrorFromCloudException, ErrorInAgent
 from search2o.models.schemaobjects import AgentExecResult, AgentTitleModel
 from search2o.execution.runtime import Runtime
 from search2o.execution.streamiter import StreamIter, StreamAgentReturn
@@ -105,6 +105,7 @@ async def _exec_agent_internal(item: ExecuteAgentModel, request: Request, iter1:
                             run_ref: RunRef | None = None) -> ExecAgentResponseModel:
     agent_name = item.agentName
     convid = item.convid
+    runtime = None
     try:
         if Hooks.errors:
             raise HooksNotLoaded()
@@ -122,7 +123,7 @@ async def _exec_agent_internal(item: ExecuteAgentModel, request: Request, iter1:
         srm = ExecStartResponseModel.model_validate(start_agent_response)
         if not srm.convid:
             srm.convid = convid
-        await Runtime.start_agent_exec(request, srm.configUpdatedAt, srm.convid)
+        runtime = await Runtime.start_agent_exec(request, srm.configUpdatedAt, srm.convid)
         if state_in_hook:
             try:
                 state = await ConversationRun.restore_state(convid, srm.userEmail)
@@ -155,6 +156,12 @@ async def _exec_agent_internal(item: ExecuteAgentModel, request: Request, iter1:
                                      error=ErrorResponseModel(message=e.message))
         iter1.done_agent(ret)
         return ret
+    except ErrorInAgent as e:
+        MyLogger.error(f"Agent {agent_name!r} could not be loaded in conversation {convid or 'new'}: {e.message()}")
+        ret = ExecAgentResponseModel(success=False, resultCode=AgentExecResult.errorInAgent,
+                                     error=ErrorResponseModel(message=e.user_message()))
+        iter1.done_agent(ret)
+        return ret
     except UnknownConversation as e:
         ret = ExecAgentResponseModel(success=False, resultCode=AgentExecResult.unknownConversation, error=ErrorResponseModel(message=e.message))
         iter1.done_agent(ret)
@@ -165,8 +172,11 @@ async def _exec_agent_internal(item: ExecuteAgentModel, request: Request, iter1:
         ret = ExecAgentResponseModel(success=False, resultCode=AgentExecResult.unexpected, error=ErrorResponseModel(message="System issue in executing the agent. Please try later."))
         iter1.done_agent(ret)
         return ret
-
-    ret = await run.execute()
-    iter1.done_agent(ret)
-    return ret
+    else:
+        ret = await run.execute()
+        iter1.done_agent(ret)
+        return ret
+    finally:
+        if runtime:
+            runtime.done(srm.convid)
 

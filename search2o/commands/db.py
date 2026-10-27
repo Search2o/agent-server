@@ -28,12 +28,13 @@ class DbCommand(CommandExec):
         connection_string = await executor.eval_expr(function, f"{path}.profile.{profile_name}.connectionString", profile_config.connectionString, ExpectedType.strt)
         if not connection_string:
             raise ShowMessage(f"Database profile {profile_name} does not specify a connection string")
+        pool_key = await executor.eval_expr(function, f"{path}.profile.{profile_name}.poolKey", profile_config.poolKey, ExpectedType.strt)
 
         sql = executor.param(function, command, command_ns, AgentWords.sql, ExpectedType.strt)
         params = executor.param(function, command, command_ns, AgentWords.params, ExpectedType.dictstrt)
         timeout = executor.param(function, command, command_ns, AgentWords.timeout, ExpectedType.numbert)
 
         executor.stream_iter.trace(lambda: f"Calling Database with connection_string = {SensitiveString.safe_connection_string(connection_string)}, sql = {sql}", TraceType.input, inv.path)
-        results =  await executor.runtime.db_connections.run_sql(profile_name, connection_pool, connection_string, sql, params, timeout)
+        results =  await executor.runtime.db_connections.run_sql(profile_name, connection_pool, connection_string, pool_key or "", sql, params, timeout)
         executor.stream_iter.trace(lambda: f"Database query returned {len(results)} rows", TraceType.output, inv.path)
         return results

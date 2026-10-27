@@ -10,6 +10,8 @@ from typing import Any
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 
+from search2o.models.configtypes import SAFE_EXPR_PATTERN
+
 
 class JsonValidator:
     # FastAPI's request-location markers, stripped so a message names the field rather than
@@ -25,6 +27,9 @@ class JsonValidator:
             "must start with a letter and contain only letters and numbers",
         r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$":
             "may contain only letters, numbers and the characters _, - and ., and must start "
+            "and end with a letter or a number",
+        r"^[A-Za-z0-9](?:[A-Za-z0-9_.:/-]*[A-Za-z0-9])?$":
+            "may contain only letters, numbers and the characters _, -, ., : and /, and must start "
             "and end with a letter or a number",
         r"^[a-z0-9]+(?:_[a-z0-9]+)*$":
             "may contain only lowercase letters, numbers and underscores, and cannot start or end with an underscore",
@@ -47,6 +52,13 @@ class JsonValidator:
         "password": "Your password",
         "userName": "Your name",
     }
+
+    # What a value's own type error looks like. When a union member's type does not fit the
+    # input, its error says only that - noise beside the error of the member that did fit.
+    TYPE_ERRORS = {"string_type": "text", "list_type": "a list", "dict_type": "an object",
+                   "model_type": "an object", "model_attributes_type": "an object",
+                   "int_type": "a whole number", "float_type": "a number", "bool_type": "true or false",
+                   "none_required": "null"}
 
     PATTERN_HINTS = (
         ("str|int|float|bool|null|any", "must be a type expression such as str, int, list[str] or dict[str, any]"),
@@ -94,6 +106,12 @@ class JsonValidator:
         if raised is not None:
             text = str(raised)
             return text if not field else f"{subject}: {text}"
+        if t == "string_pattern_mismatch" and ctx.get("pattern") == SAFE_EXPR_PATTERN:
+            bad = ", ".join(sorted({c for c in str(err.get("input", ""))
+                                   if not (" " <= c <= "~" or c in "\t\r\n")}))
+            return (f"{subject} is an expression, which may contain only printable ASCII "
+                    f"characters, not {bad}. Inside a string, write such a character as an escape, "
+                    f"for example \\u00e9 for é.")
         match t:
             case "missing":
                 return f"{subject} is required."
@@ -132,6 +150,8 @@ class JsonValidator:
             case "enum" | "literal_error":
                 expected = str(ctx.get("expected", "")).replace("'", "")
                 return f"{subject} must be one of: {expected}." if expected else f"{subject} is not a permitted value."
+            case "union_type":
+                return f"{subject} {err['msg']}."
             case "json_invalid":
                 return "The request body is not valid JSON."
             case _:
@@ -139,12 +159,59 @@ class JsonValidator:
                 return f"{subject}: {msg}" if field else msg
 
     @classmethod
-    def format_validation_error(cls, exc: ValidationError | RequestValidationError) -> list[str]:
-        messages = []
-        for err in exc.errors():
-            messages.append(cls.describe(err, cls.field_name(err)))
-        return messages
+    def format_validation_error(cls, exc: ValidationError | RequestValidationError,
+                                data: Any = None) -> list[str]:
+        """With `data`, the input that was validated: a value that fails every member of a union
+        is reported once, at its own path, by the member its type fits."""
+        errors = exc.errors()
+        if data is not None:
+            errors = cls.without_union_noise([{**err, "loc": cls.input_loc(
+                err.get("loc", ()), data, err.get("type") == "missing")} for err in errors])
+        return [cls.describe(err, cls.field_name(err)) for err in errors]
+
+    @staticmethod
+    def input_loc(loc: tuple, data: Any, missing: bool = False) -> tuple:
+        """The location with pydantic's union-member names taken out: only the steps that exist
+        in the input are kept - except the last step of a missing error, which is the field that
+        is not there."""
+        kept, current = [], data
+        for step in loc:
+            # A dynamic command key (llm.a) is reported in backticks; see CommandBlock.
+            key = step.strip("`") if isinstance(step, str) else step
+            if isinstance(current, dict) and key in current:
+                current = current[key]
+            elif isinstance(current, list) and isinstance(step, int) and 0 <= step < len(current):
+                current = current[step]
+            else:
+                continue
+            kept.append(step)
+        if missing and loc:
+            kept.append(loc[-1])
+        return tuple(kept)
 
     @classmethod
-    def error_text(cls, exc: ValidationError | RequestValidationError) -> str:
-        return " ".join(cls.format_validation_error(exc))
+    def without_union_noise(cls, errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # An error below a location means some union member fit the value there, so a type
+        # mismatch at that location is from a member that did not.
+        parents = {err["loc"][:i] for err in errors for i in range(len(err["loc"]))}
+        errors = [err for err in errors
+                  if not (err.get("type") in cls.TYPE_ERRORS and err["loc"] in parents)]
+        by_loc: dict[tuple, list[dict[str, Any]]] = {}
+        for err in errors:
+            by_loc.setdefault(err["loc"], []).append(err)
+        kept = []
+        for group in by_loc.values():
+            fitting = [err for err in group if err.get("type") not in cls.TYPE_ERRORS]
+            if fitting or len(group) == 1:
+                kept += fitting or group
+                continue
+            # No member's type fits: one error naming every type that would.
+            kinds = list(dict.fromkeys(cls.TYPE_ERRORS[err["type"]] for err in group))
+            kept.append({"loc": group[0]["loc"], "type": "union_type",
+                         "msg": f"must be {', '.join(kinds[:-1])} or {kinds[-1]}" if len(kinds) > 1
+                         else f"must be {kinds[0]}"})
+        return kept
+
+    @classmethod
+    def error_text(cls, exc: ValidationError | RequestValidationError, data: Any = None) -> str:
+        return " ".join(cls.format_validation_error(exc, data))
