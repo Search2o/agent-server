@@ -378,6 +378,11 @@ class AgentExecutor:
             for part in parts:
                 self.stream_iter.data(part)
 
+    def finished(self) -> ExecResponse:
+        if not self.output.is_set():
+            self.add_output_part("Agent executed successfully without an output.")
+        return ExecResponse(result_code=AgentExecResult.success, output=self.output)
+
     def check_stop(self) -> None:
         if self.run_ref and self.run_ref.stop_requested:
             raise AgentStopped()
@@ -595,7 +600,7 @@ class AgentExecutor:
         try:
             await self.secrets.prefetch(self.secrets_used)
             await self.exec_function(AgentWords.main, None, 0 if state else -1)
-            return ExecResponse(result_code=AgentExecResult.success, output=self.output)
+            return self.finished()
         except ErrorFromCloudException as e:
             if e.status_code == 401:
                 self.stream_iter.progress("User session has expired. Must login.")
@@ -603,7 +608,7 @@ class AgentExecutor:
             else:
                 return ExecResponse(result_code=AgentExecResult.callFailed, error_message=e.detail)
         except AgentDone:
-            return ExecResponse(result_code=AgentExecResult.success, output=self.output)
+            return self.finished()
         except AgentStopped:
             return ExecResponse(result_code=AgentExecResult.stopped, output=self.output,
                                 error_message="The agent was stopped.")

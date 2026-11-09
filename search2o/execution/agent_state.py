@@ -84,7 +84,7 @@ class AgentOutput(BaseModel):
         return parts
 
     def is_set(self) -> bool:
-        return bool(self.parts)
+        return any(not isinstance(part, TextPartApi) or part.text.strip() for part in self.parts)
 
     @staticmethod
     def is_valid_type(obj: Any) -> bool:
