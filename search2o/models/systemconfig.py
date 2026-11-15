@@ -17,7 +17,7 @@ from .schemaobjects import ServiceLevel
 ProfileDoc = Annotated[str, Field(default="", title="Documentation", description="Documentation of what this profile is used for. This field is optional. It can be useful in generating agent definitions.", max_length=500)]
 
 class SecretsUsedModel(BaseModel):
-    secretsUsed: list[str] = Field(default_factory=list, title="Secrets used", description="The secret names this profile's expressions read (sys.secret['NAME']). Worked out by the cloud when the profile is saved and sent with the profile to agent servers; anything sent in this field is ignored.")
+    secretsUsed: list[str] = Field(default_factory=list, title="Secrets used", description="The secret names this profile's expressions read (sys.secret['NAME']). Worked out by the cloud service when the profile is saved and sent with the profile to agent servers; anything sent in this field is ignored.")
 
 class NamedBaseModel(BaseModel):
     name: ProfileName = Field(..., title="Name", description="The name this profile is referred to by, in agents and in other configuration.")
@@ -324,7 +324,7 @@ class OidcAuthModel(BaseModel):
     issuer: str = Field(..., title="Issuer", description="The provider's issuer URL, such as https://login.example.com. Its configuration is read from there, and it is what the 'iss' claim must match.", max_length=500)
     clientId: str = Field(..., title="Client id", description="The client id this account was registered with at the provider.", max_length=200)
     returnUrl: str = Field(..., title="Return address", description="Where the identity provider sends the browser after signing in: the Search2o application as it is reached from a browser, such as https://search2o.example.com/ui. Register this same address at the provider as the application's redirect URI - the two must match exactly, or the provider refuses the sign-in. One address for the account.", max_length=500)
-    clientSecret: str = Field(default="", title="Client secret", description="The client secret the provider issued for this registration. Search2o Cloud uses it to exchange a sign-in code for tokens; it is encrypted at rest and never returned. Leave it empty on an update to keep the stored one.", max_length=2000)
+    clientSecret: str = Field(default="", title="Client secret", description="The client secret the provider issued for this registration. The cloud service uses it to exchange a sign-in code for tokens; it is encrypted at rest and never returned. Leave it empty on an update to keep the stored one.", max_length=2000)
     scopes: list[str] = Field(default_factory=lambda: ["openid", "profile", "email"], title="Scopes", description="What to ask the provider for. The email and name are read from the result, so both are needed.", max_length=20)
     requireVerifiedEmail: bool = Field(default=True, title="Require a verified email", description="Whether the provider must say the email address is verified. Leave it on unless your provider never sends that claim.")
     emailClaim: str = Field(default="email", title="Email claim", description="Which claim in the token holds the email address.", max_length=100)
@@ -376,7 +376,7 @@ class AuthModel(BaseModel):
 class SysVariables(StrEnum):
     userEmail = "userEmail"  # Email of the user.
     userSession = "userSession" # A hashed value of the session ID of the user in the agent server. This can be used to store data that is specific to the current user session.
-    serverIp = "serverIp" # IP address of the agent server as seen by the cloud. This can be used in logging server specific activity.
+    serverIp = "serverIp" # IP address of the agent server as seen by the cloud service. This can be used in logging server specific activity.
     cookies = "cookies" # User cookies in the request. This can expose the raw session ID of the user and other such secret values. This needs to be used carefully.
 
 
@@ -443,7 +443,7 @@ class AgentServerModel(BaseModel):
     redocUrl: str | None = Field(default="/redoc", title="ReDoc URL", description="Where the ReDoc documentation is served.")
     openapiUrl: str | None = Field(default="/openapi.json", title="OpenAPI URL", description="Where the OpenAPI schema is served.")
     logs: dict[str, JsonValue] = Field(default_factory=dict, title="Logging", description="Logging configuration for the agent server.")
-    cloudPool: ConnectionPoolModel = Field(default_factory=ConnectionPoolModel, title="Cloud connection pool", description="How this agent server connects to Search2o Cloud. It carries connection settings only: it is deliberately not one of the API connection pools, and it has no certificate fields, so nothing configured for an agent can change how this server reaches Search2o Cloud. A server behind a proxy that re-signs TLS trusts that proxy through the SSL_CERT_FILE environment variable, which is where a machine-wide trust setting belongs. Changing any of this needs an agent server restart.")
+    cloudPool: ConnectionPoolModel = Field(default_factory=ConnectionPoolModel, title="Cloud service connection pool", description="How this agent server connects to the cloud service. It carries connection settings only: it is deliberately not one of the API connection pools, and it has no certificate fields, so nothing configured for an agent can change how this server reaches the cloud service. A server behind a proxy that re-signs TLS trusts that proxy through the SSL_CERT_FILE environment variable, which is where a machine-wide trust setting belongs. Changing any of this needs an agent server restart.")
     uiConfig: dict[str, JsonValue] = Field(default_factory=dict, title="UI configuration", description="A free form JSON configuration that is sent to the UI from the getUiConfig call.")
     shutdownGrace: int = Field(default=10, ge=0, title="Shutdown grace (seconds)", description="When this agent server shuts down, how many seconds agents that are still running get to finish before they are stopped. Changing this needs an agent server restart.")
 
@@ -491,7 +491,7 @@ class HooksModel(BaseModel):
     onAgentError: ImportPath | None = Field(default=None, title="On agent error", description="Called after an agent fails, before the run is recorded. If it raises, its message is reported as the error.")
     onAgentPublish: ImportPath | None = Field(default=None, title="On agent publish", description="Called after an agent is published, with its name, version, definition, title, tag and the publisher's email. If it raises, the caller gets an error that says the agent was published.")
     onAgentDelete: ImportPath | None = Field(default=None, title="On agent delete", description="Called after an agent is deleted, with its name. If it raises, the caller gets an error that says the agent was deleted.")
-    save: ImportPath | None = Field(default=None, title="Save conversation state", description="Stores a conversation's state, given convid, state, userEmail and agentName. The state is not encrypted by this server, and ownership is not checked by Search2o Cloud. Validation runs keep their state in Search2o Cloud. Set together with restore and deleteConversation.")
+    save: ImportPath | None = Field(default=None, title="Save conversation state", description="Stores a conversation's state, given convid, state, userEmail and agentName. The state is not encrypted by this server, and ownership is not checked by the cloud service. Validation runs keep their state in the cloud service. Set together with restore and deleteConversation.")
     restore: ImportPath | None = Field(default=None, title="Restore conversation state", description="Returns the state stored by save for a convid, or None when there is none. It also receives userEmail, so it can check who owns the conversation. Set together with save and deleteConversation.")
     deleteConversation: ImportPath | None = Field(default=None, title="Delete conversation state", description="Deletes the state stored by save for a convid. Set together with save and restore. Expiring stored state is the customer's responsibility.")
     vault: ImportPath | None = Field(default=None, title="Secrets vault", description="Returns the value of a secret, given its name, for the vault secret source. Called before an agent runs, for each secret the agent reads.")

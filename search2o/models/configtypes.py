@@ -49,6 +49,8 @@ class ExprString(str):
 
 
 class PromptText(ExprString):
+    """A prompt's system or user text. Its length is capped by maxPromptLength, a constant
+    the cloud service applies wherever a prompt is saved, not by the model."""
     maxLength = None
 
 
