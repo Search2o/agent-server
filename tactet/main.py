@@ -186,7 +186,7 @@ def create_app():
                   },
                        license_info={
                     "name": "Proprietary",
-                    "url": "https://tactet.com/legal/license.txt"
+                    "url": "https://tactet.com/legal/license.html"
                   },
                        terms_of_service="https://tactet.com/legal/terms.html",
                        servers=[{ "url": "/" }],
