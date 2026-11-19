@@ -1,0 +1,645 @@
+# Copyright (c) 2025-present Search2o, Inc.
+# All rights reserved. Proprietary software.
+# Running or operating this software requires valid, ongoing authorization from Search2o.
+# See the LICENSE.md file and https://tactet.com/legal/license.html.
+
+from __future__ import annotations
+
+import asyncio
+import contextvars
+import copy
+from abc import ABC
+from dataclasses import dataclass
+from types import SimpleNamespace
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+from typing import cast
+
+from fastapi import Request
+from pydantic import JsonValue
+
+from tactet.common.enums import AgentWords, TraceType
+from tactet.common.exceptions import ErrorInAgent, ErrorFromCloudException, ShowMessage, error_message
+from tactet.common.exprhelper import ExprHelper
+from tactet.common.flowcontrol import AgentStopped, BreakException, ContinueException, ReturnFunctionException, \
+    AgentDone, FailCommandException, FlowControlException, HookRefused, CostLimitExceeded
+from tactet.common.mynamespace import AgentNamespace, CommandNamespace
+from tactet.common.requesthelper import RequestHelper
+from tactet.common.rest_call import RestCall
+from tactet.common.typechecker import ExpectedType, TypeChecker
+from tactet.execution.agent_state import ConversationState, AgentOutput
+from tactet.execution.agentexec import AgentExec
+from tactet.execution.llmresponse import LlmResponse
+from tactet.execution.prompts import Prompts
+from tactet.execution.runtime import Runtime, RuntimeState
+from tactet.execution.secretsmanager import SecretsManager
+from tactet.execution.statenodes import FunctionNode, CommandListNode, Node
+from tactet.execution.streamiter import StreamIter
+from tactet.mcpclient.mcp import Mcp
+from tactet.models.agentexecmodel import FunctionExecModel, CommandExecModel, SetVariable, CommandList
+from tactet.models.prompt import LlmResponseModel
+from tactet.models.promptmodels import PromptScope
+from tactet.models.schemaobjects import CommandName, RESULT_PRODUCING_COMMANDS, VarNamespace, ReadOnlyVariable, \
+    AgentExecResult
+from tactet.models.systemconfig import SysVariables
+
+if TYPE_CHECKING:
+    from tactet.execution.conversationrun import ConversationRun
+
+
+@dataclass
+class ExecResponse:
+    result_code: AgentExecResult
+    output: AgentOutput | None = None
+    ask_input: dict[str, Any] | None = None
+    error_message: str = ""
+    user_message: str = ""
+    path: str = ""
+
+class AskException(FlowControlException):
+    def __init__(self, node: Node, ask_input: dict[str, Any]):
+        self.ask_input = ask_input
+        self.nodes = []
+        self.append(node)
+
+    def append(self, node: Node):
+        self.nodes.append(node)
+
+
+class CommandExec(ABC):
+    async def exec_command(self, inv: CommandInvocation, executor: AgentExecutor) -> JsonValue:
+        ...
+
+    @staticmethod
+    def unwrap_parallel(eg: BaseExceptionGroup, executor: AgentExecutor) -> BaseException:
+        flat: list[BaseException] = []
+
+        def collect(e: BaseException) -> None:
+            if isinstance(e, BaseExceptionGroup):
+                for sub in e.exceptions:
+                    collect(sub)
+            else:
+                flat.append(e)
+
+        collect(eg)
+        refused = next((e for e in flat if isinstance(e, HookRefused)), None)
+        if refused:
+            return refused
+        chosen = next((e for e in flat if isinstance(e, (AgentStopped, CostLimitExceeded, AskException))), None)
+        if chosen:
+            for other in flat:
+                if other is not chosen:
+                    executor.stream_iter.trace(lambda other=other: f"Another command running in parallel also failed: {error_message(other)}", TraceType.error)
+            return chosen
+        if len(flat) == 1:
+            return flat[0]
+        return ShowMessage(f"Commands running in parallel failed: "
+                           f"{'; '.join(error_message(e) for e in flat)}")
+
+@dataclass
+class CommandInvocation:
+    frame: "FunctionFrame"
+    command: CommandExecModel
+    command_ns: SimpleNamespace
+    path: str
+    replay_index: int = -1
+
+
+class FunctionFrame:
+    def __init__(self, model: FunctionExecModel, frame_locals: dict[str, Any]):
+        self.model = model
+        self.locals = frame_locals
+
+    @property
+    def name(self) -> str:
+        return self.model.name
+
+    @property
+    def args(self):
+        return self.model.args
+
+    @property
+    def commands(self):
+        return self.model.commands
+
+    @property
+    def onError(self):
+        return self.model.onError
+
+
+_calling_path: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar("calling_path", default=frozenset())
+_replay_state: contextvars.ContextVar[list[Node]] = contextvars.ContextVar("replay_state", default=[])
+_answers_scope: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("answers_scope", default=None)
+
+
+class Name2Command:
+    command_executors: dict[str, CommandExec] = {}
+
+    @classmethod
+    def get_command(cls, name: CommandName) -> CommandExec:
+        return cls.command_executors.get(name)
+
+class AgentExecutor:
+    def __init__(self, run: "ConversationRun",
+                 agent_exec: AgentExec,
+                 inputs: dict[str, Any]) -> None:
+        self.run = run
+
+        self.agent = agent_exec.agent_definition
+        self.agent_name = agent_exec.agent_name
+        self.agent_version = agent_exec.agent_version
+
+        if self.agent_name not in self.conversation_state.agentVars:
+            self.conversation_state.agentVars[self.agent_name] = AgentNamespace()
+        self.agent_vars = self.conversation_state.agentVars[self.agent_name]
+        self.agent_prompts = agent_exec.prompts
+        self.agent_const = copy.deepcopy(agent_exec.const)
+        self.compiled = agent_exec.compiled
+        self.local_prompts = run.local_prompts
+        self.current_stack: FunctionNode | None = None
+
+        self.inputs = inputs
+        self.query = self.get_query(self.inputs)
+        self.args: dict[str, JsonValue] = {}
+
+        self.callstack: list[Node] = []
+        self.mcps: dict[str, Mcp] = {}
+        self.mcp_lock = asyncio.Lock()
+        self.secrets_used = agent_exec.secrets_used
+        self.secrets = SecretsManager(self.runtime.secrets_model, self.runtime.secret_cache)
+        self.sysvar = self.create_ro()
+
+    @property
+    def request(self) -> Request:
+        return self.run.request
+
+    @property
+    def convid(self) -> str:
+        return self.run.convid
+
+    @property
+    def user_email(self) -> str:
+        return self.run.user_email
+
+    @property
+    def stream_iter(self) -> StreamIter:
+        return self.run.stream_iter
+
+    @property
+    def run_ref(self):
+        return self.run.run_ref
+
+    @property
+    def runtime(self) -> RuntimeState:
+        return self.run.runtime
+
+    @property
+    def conversation_state(self) -> ConversationState:
+        return self.run.conversation_state
+
+    def prompt_store(self, scope: PromptScope) -> Prompts:
+        if scope == PromptScope.agent:
+            return self.conversation_state.agentPrompts.setdefault(self.agent_name, Prompts())
+        if scope == PromptScope.local:
+            return self.local_prompts
+        return self.conversation_state.prompts
+
+    @property
+    def output(self) -> AgentOutput:
+        return self.run.output
+
+    @property
+    def ask_answers(self) -> dict[str, Any] | None:
+        return _answers_scope.get()
+
+    @staticmethod
+    def replay_state() -> list[Node]:
+        return _replay_state.get()
+
+    @staticmethod
+    def set_branch_scope(state: list[Node], answers: dict[str, Any] | None) -> None:
+        _replay_state.set(state)
+        _answers_scope.set(answers)
+
+    def remember(self, label: str, text: str) -> None:
+        self.run.remember(self.agent_name, label, text)
+
+    def forget(self, labels: list[str]) -> None:
+        self.run.forget(self.agent_name, labels)
+
+    def add_llm_result(self, profile: str, model: str, res: LlmResponseModel, start_time: int):
+        self.run.add_llm_result(profile, model, res, start_time)
+
+    @staticmethod
+    def get_query(inputs: dict[str, Any]) -> str:
+        return inputs.get("query", "")
+
+    def set_iter(self, frame: FunctionFrame, name: str, value: JsonValue) -> None:
+        self.set_variable_val(frame, name, value)
+
+    def remove_iter(self, frame: FunctionFrame, name: str) -> None:
+        self.remove_variable(frame, name)
+
+    async def set_variable(self, frame: FunctionFrame, var: SetVariable, path: str) -> JsonValue:
+        value = await self.eval_expr(frame, f"{path}.{var.pn()}", var.value, ExpectedType.anyt)
+        match var.ns: # noop if it's not one of the below
+            case VarNamespace.local: ns = frame.locals
+            case VarNamespace.agent:
+                namespace = self.agent_vars
+                ns = vars(namespace)
+            case VarNamespace.conv:
+                my_namespace = self.conversation_state.conversationVars
+                ns = vars(my_namespace)
+            case _: return # Cannot happen after cloud validation
+
+        if var.path:
+            cur_path = var.name if var.ns == VarNamespace.local else f"{var.ns_str()}{var.name}"
+            try:
+                cur = ns[var.name]
+            except KeyError:
+                raise ShowMessage(
+                    f"While setting variable at {path}: "
+                    f"the base variable {cur_path!r} is not defined.", path=path
+                ) from None
+
+
+            evaluated_path: list[str | int] = [
+                await self.eval_expr(
+                    frame,
+                    f"{path}.{var.pn()}",
+                    key,
+                    ExpectedType.strorintt,
+                )
+                if isinstance(key, str)
+                else key
+                for key in var.path
+            ]
+
+            for key in evaluated_path[:-1]:
+                next_path = f"{cur_path}[{key!r}]"
+                try:
+                    cur = cur[key]
+                except (KeyError, TypeError, IndexError) as e:
+                    raise ShowMessage(
+                        f"While setting variable at {path}: "
+                        f"could not access {next_path}. "
+                        f"{type(e).__name__}: {e}", path=path
+                    ) from e
+                cur_path = next_path
+
+            key = evaluated_path[-1]
+            target_path = f"{cur_path}[{key!r}]"
+
+            try:
+                cur[key] = value
+            except (KeyError, TypeError, IndexError) as e:
+                raise ShowMessage(
+                    f"While setting variable at {path}: "
+                    f"could not assign a value to {target_path}. "
+                    f"{type(e).__name__}: {e}", path=path
+                ) from e
+
+        else:
+            ns[var.name] = value
+        return value
+
+    # Local variables can be of any type. Agent and conv variables need to be of JsonValue types.
+    def set_variable_val(self, frame: FunctionFrame, name: str, val: Any) -> None:
+        frame.locals[name] = val
+
+    def set_readonly_variable(self, frame: FunctionFrame, ro: ReadOnlyVariable, val: Any) -> None:
+        frame.locals[ro] = val
+
+    def get_readonly_variable(self, frame: FunctionFrame, ro: ReadOnlyVariable) -> Any:
+        return frame.locals.get(ro)
+
+    def remove_variable(self, frame: FunctionFrame, name: str) -> None:
+        frame.locals.pop(name, None)
+
+    async def scalar_value(self, function: FunctionFrame, command: CommandExecModel, path: str, expected_type: ExpectedType = ExpectedType.anyt) -> JsonValue:
+        return await self.eval_expr(function, path, command.scalar_value, expected_type)
+
+    def param(self, function: FunctionFrame, command: CommandExecModel, command_ns: SimpleNamespace, key: str,
+                      expected_type: ExpectedType = ExpectedType.anyt) -> JsonValue:
+        val = getattr(command_ns, key)
+        if val is None or TypeChecker.check_type(expected_type, val):
+            return val
+        else:
+            raise ShowMessage(f"In function {function.name!r}, command {command.qn()}, {str(key)!r} is expected to evaluate to a {expected_type} but it evaluated to {type(val).__name__}")
+
+    async def prepare(self, frame: FunctionFrame, command: CommandExecModel, path: str,
+                      replay_index: int = -1) -> CommandInvocation:
+        path = f"{path}.{command.pn()}"
+        self.stream_iter.trace(lambda: f"Executing command: {command.qn()}", TraceType.flow, path)
+        command_ns = CommandNamespace()
+        self.set_readonly_variable(frame, ReadOnlyVariable.command, command_ns)
+        await self.set_command_params(frame, command, command_ns, path)
+        return CommandInvocation(frame, command, command_ns, path, replay_index)
+
+    async def set_command_params(self, function: FunctionFrame, command: CommandExecModel, command_ns: SimpleNamespace,
+                                 path: str):
+        for key, value in command.params.items():
+            setattr(command_ns, key, await self.eval_expr(function, f"{path}.{key}", value, ExpectedType.anyt))
+
+    async def eval_expr(self, frame: FunctionFrame, path: str, val: JsonValue, expected_type: ExpectedType = ExpectedType.anyt, sub_path: str = "") -> JsonValue:
+        if not val:
+            return val
+        if isinstance(val, str):
+            valin = ExprHelper.get_expr(val)
+            if valin:
+                try:
+                    ret = await self.runtime.execute(self.compiled, valin, frame.locals)
+                except ErrorInAgent:
+                    raise
+                except Exception as e:
+                    if sub_path:
+                        message = f"Could not evaluate the Python expression at {sub_path.removeprefix(".")}: {error_message(e)}"
+                    else:
+                        message = f"Could not evaluate the Python expression: {error_message(e)}"
+                    raise ShowMessage(message, path=path)
+                if TypeChecker.check_type(expected_type, ret):
+                    return ret
+                else:
+                    where = f" at {sub_path.removeprefix('.')}" if sub_path else ""
+                    raise ShowMessage(f"The expression{where} is expected to evaluate to {expected_type} but it evaluated to {type(ret).__name__}.",
+                                      path=path)
+            else:
+                return val # String literal
+        elif isinstance(val, list):
+            return [await self.eval_expr(frame, path, item, ExpectedType.anyt, f"{sub_path}.{i}") for i, item in enumerate(val)]
+        elif isinstance(val, dict):
+            return {k: await self.eval_expr(frame, path, v, ExpectedType.anyt, f"{sub_path}.{k!r}") for k, v in val.items()}
+        else:
+            return val  # Non string basic value
+
+    def add_output_part(self, val: str | dict | list | LlmResponse):
+        parts = self.output.add(val)
+        if parts:
+            for part in parts:
+                self.stream_iter.data(part)
+
+    def finished(self) -> ExecResponse:
+        if not self.output.is_set():
+            self.add_output_part("Agent executed successfully without an output.")
+        return ExecResponse(result_code=AgentExecResult.success, output=self.output)
+
+    def check_stop(self) -> None:
+        if self.run_ref and self.run_ref.stop_requested:
+            raise AgentStopped()
+
+    async def exec_command(self, function: FunctionFrame, command: CommandExecModel, path: str, replay_index: int = -1) -> bool:
+        self.check_stop()
+        inv = None
+        prev_command_ns = self.get_readonly_variable(function, ReadOnlyVariable.command)
+        try:
+            command_exec = Name2Command.get_command(command.name)
+            inv = await self.prepare(function, command, path, replay_index)
+            result = await command_exec.exec_command(inv, self)
+            if command.name in RESULT_PRODUCING_COMMANDS:
+                self.set_readonly_variable(function, ReadOnlyVariable.result, result)
+            return True
+        except FlowControlException:
+            raise
+        except ErrorFromCloudException as e:
+            self.stream_iter.trace(lambda e=e: f"Received an error from Tactet cloud while executing the command {command.qn()}: {e}",
+                                   TraceType.error, inv.path if inv else path)
+            raise
+        except Exception as exc:
+            if isinstance(exc, ErrorInAgent):
+                if not exc.path:
+                    exc.path = inv.path if inv else path
+            else:
+                self.stream_iter.trace(lambda: f"An unexpected exception was raised executing the command {command.qn()}.",
+                                       TraceType.error, inv.path if inv else path)
+            self.set_readonly_variable(function, ReadOnlyVariable.exc, exc)
+            on_error = command.command_list(AgentWords.onError)
+            if on_error:
+                try:
+                    await self.exec_commands_no_breaks(function, on_error, path)
+                except AskException:
+                    raise ShowMessage(f"The {CommandName.ask} command cannot be used inside error handling.")
+                return False
+            else:
+                raise
+        finally:
+            self.set_readonly_variable(function, ReadOnlyVariable.command, prev_command_ns)
+
+    def create_ro(self) -> SimpleNamespace:
+        sysvar = SimpleNamespace()
+        # Always added
+        sysvar.inputs = self.inputs
+        sysvar.query = self.query
+        sysvar.secret = self.secrets
+
+        # Optional
+        included = self.runtime.sysvar.sysVariables
+        if SysVariables.userEmail in included:
+            sysvar.userEmail = self.user_email
+        if SysVariables.userSession in included:
+            sysvar.userSession = RequestHelper.token_hash(self.request)
+        if SysVariables.serverIp in included:
+            sysvar.serverIp = Runtime.server_ip
+        if SysVariables.cookies in included:
+            sysvar.cookies = self.request.cookies
+        return sysvar
+
+    def create_dict(self) -> dict[str, JsonValue]:
+        d = {}
+        sysvar = SimpleNamespace(**vars(self.sysvar))
+        sysvar.exists = self.exists_function(d)
+        d[ReadOnlyVariable.sys.value] = sysvar
+        d[ReadOnlyVariable.agent.value] = self.agent_vars
+        d[ReadOnlyVariable.conv.value] = self.conversation_state.conversationVars
+        d[ReadOnlyVariable.const.value] = SimpleNamespace(**self.agent_const)
+        d['__builtins__'] = self.runtime.allowlist.eval_allowlist
+        d[ReadOnlyVariable.command.value] = CommandNamespace()
+        return d
+
+    @classmethod
+    def exists_function(cls, d: dict[str, Any]) -> Callable[[str, str], bool]:
+        def exists(scope: str, name: str) -> bool:
+            if not isinstance(name, str):
+                raise ShowMessage("The name given to sys.exists must be a string.")
+            match scope:
+                case VarNamespace.local:
+                    return name in cls.get_locals_only(d)
+                case VarNamespace.agent:
+                    return name in vars(d[ReadOnlyVariable.agent.value])
+                case VarNamespace.conv:
+                    return name in vars(d[ReadOnlyVariable.conv.value])
+                case ReadOnlyVariable.const:
+                    return name in vars(d[ReadOnlyVariable.const.value])
+                case "allowlist":
+                    return name in d["__builtins__"]
+            raise ShowMessage("The scope given to sys.exists must be one of local, agent, conv, const or allowlist.")
+        return exists
+
+    @staticmethod
+    def get_locals_only(d: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        predefined = {ro.value for ro in ReadOnlyVariable if ro != ReadOnlyVariable.result} | {'__builtins__'}
+        return {
+            k:v for k, v in d.items() if k not in predefined
+        }
+
+    async def exec_commands_no_breaks(self, function: FunctionFrame, command_list: CommandList, path: str, replay_index: int = -1) -> bool:
+        if command_list:
+            path = f"{path}.{command_list.name}"
+            replay_node = self.get_node(replay_index, CommandListNode)
+            start = 0
+            if replay_node:
+                start = replay_node.commandNumber
+                replay_index += 1
+            li = command_list.commands[start:]
+            for index, command in enumerate(li, start):
+                try:
+                    await self.exec_command(function, command, path, replay_index)
+                except AskException as ae:
+                    ae.append(CommandListNode(commandNumber=index))
+                    raise
+                replay_index = -1
+        return True
+
+    async def exec_command_list(self, function: FunctionFrame, command_list: CommandList, path: str, replay_index: int = -1) -> bool:
+        if command_list:
+            path = f"{path}.{command_list.name}"
+            replay_node = self.get_node(replay_index, CommandListNode)
+            start = 0
+            if replay_node:
+                start = replay_node.commandNumber
+                replay_index += 1
+            li = command_list.commands[start:]
+            index = 0
+            for index, command in enumerate(li, start):
+                try:
+                    await self.exec_command(function, command, path, replay_index)
+                except BreakException:
+                    return False
+                except ContinueException:
+                    return True
+                except AskException as ae:
+                    ae.append(CommandListNode(commandNumber=index))
+                    raise
+                replay_index = -1
+        return True
+
+    def get_node[T: Node](
+            self,
+            replay_index: int,
+            expected_type: type[T],
+    ) -> T | None:
+        if replay_index >= 0:
+            prev_state = _replay_state.get()
+            if len(prev_state) <= replay_index:
+                raise ShowMessage("Missing information in accepting user's responses.")
+            node = prev_state[replay_index]
+            if not isinstance(node, expected_type):
+                raise ShowMessage("Unexpected type error in accepting user's responses.")
+            return cast(T, node)
+        return None
+
+    async def exec_function(self, function_name: str, arg_values: dict[str, JsonValue] = None, replay_index: int = -1) -> Any:
+        replay_node = self.get_node(replay_index, FunctionNode)
+        if replay_node:
+            function_name = replay_node.name
+            arg_values = replay_node.args
+            replay_index += 1
+        self.stream_iter.trace(lambda: f"Executing function {str(function_name)!r}", TraceType.flow, function_name)
+        function = self.agent.functions.get(function_name)
+        if function:
+            if not function.commands:
+                return None
+            path_here = _calling_path.get()
+            if function_name in path_here:
+                raise ShowMessage(f"Function '{function_name}' is already executing and is being called again (reentrant)")
+            path_token = _calling_path.set(path_here | {function_name})
+            frame = FunctionFrame(function, self.create_dict())
+            path = function_name
+            try:
+                if function.args:
+                    for arg_name, _arg in function.args.items():
+                        val = arg_values.get(arg_name) if arg_values else None
+                        self.set_variable_val(frame, arg_name, val)
+                if replay_node:
+                    frame.locals.update(replay_node.localVars)
+                try:
+                    await self.exec_commands_no_breaks(frame, function.commands, path, replay_index)
+                except ReturnFunctionException as e:
+                    return e.return_value
+                return None
+            except AskException as ae:
+                ae.append(FunctionNode(name=function_name, args=arg_values if arg_values else {},
+                                       localVars=self.get_locals_only(frame.locals)))
+                raise
+            except (ErrorFromCloudException, AgentDone, FailCommandException, AgentStopped, CostLimitExceeded, HookRefused):
+                raise
+            except Exception as e:
+                if function.onError:
+                    try:
+                        self.set_readonly_variable(frame, ReadOnlyVariable.exc, e)
+                        await self.exec_commands_no_breaks(frame, function.onError, path)
+                    except ReturnFunctionException as e:
+                        return e.return_value
+                    except AskException:
+                        raise ShowMessage(f"The {CommandName.ask} command cannot be used inside error handling.")
+                    except Exception:
+                        raise
+                else:
+                    raise
+            finally:
+                _calling_path.reset(path_token)
+        else:
+            raise ShowMessage(f"Unknown function: {function_name!r}")
+
+
+    async def exec_agent(self) -> ExecResponse:
+        self.stream_iter.trace(lambda: f"Starting executing agent {self.agent_name!r}", TraceType.flow)
+        agent_path_token = _calling_path.set(frozenset())
+        state = self.run.prev_state
+        replay_token = _replay_state.set(state)
+        answers_token = _answers_scope.set(self.run.ask_answers)
+        try:
+            await self.secrets.prefetch(self.secrets_used)
+            await self.exec_function(AgentWords.main, None, 0 if state else -1)
+            return self.finished()
+        except ErrorFromCloudException as e:
+            if e.status_code == 401:
+                self.stream_iter.progress("User session has expired. Must login.")
+                return ExecResponse(result_code=AgentExecResult.mustLogin, error_message=e.detail)
+            else:
+                return ExecResponse(result_code=AgentExecResult.callFailed, error_message=e.detail)
+        except AgentDone:
+            return self.finished()
+        except AgentStopped:
+            return ExecResponse(result_code=AgentExecResult.stopped, output=self.output,
+                                error_message="The agent was stopped.")
+        except CostLimitExceeded as e:
+            return ExecResponse(result_code=AgentExecResult.errorInAgent, error_message=e.message,
+                                user_message=e.user_message)
+        except AskException as e:
+            self.callstack = e.nodes[::-1]
+            return ExecResponse(result_code=AgentExecResult.ask, output=self.output, ask_input=e.ask_input)
+        except FailCommandException as e:
+            return ExecResponse(result_code=AgentExecResult.failCommand, error_message=e.message,
+                                user_message=e.message, path=e.path)
+        except HookRefused:
+            raise
+        except ErrorInAgent as e:
+            return ExecResponse(result_code=AgentExecResult.errorInAgent, error_message=f"{e}",
+                                user_message=e.user_message(), path=e.path)
+        except Exception as exc:
+            message = f"Unexpected error executing the agent: {type(exc).__name__}"
+            try:
+                await RestCall.report_error(self.request, message, exc)
+            except Exception:
+                pass
+            return ExecResponse(result_code=AgentExecResult.unexpected, error_message=message)
+        finally:
+            _calling_path.reset(agent_path_token)
+            _replay_state.reset(replay_token)
+            _answers_scope.reset(answers_token)
+            for mcp in self.mcps.values():
+                try:
+                    await mcp.close()
+                except Exception as e:
+                    self.stream_iter.trace(lambda e=e: f"Error closing MCP connection: {e}", TraceType.error)
+

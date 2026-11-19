@@ -3,14 +3,14 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "search2o"
-version = "0.12.5"
-description = "Search2o Agent Server"
+name = "tactet"
+version = "0.13.1"
+description = "Tactet Agent Server"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "LicenseRef-Proprietary"
 license-files = ["LICENSE.md"]
-authors = [{ name = "Search2o", email = "info@search2o.com" }]
+authors = [{ name = "Search2o, Inc.", email = "info@tactet.com" }]
 keywords = ["search", "agent", "agents", "llm", "ai"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -49,14 +49,14 @@ db = [
 ]
 
 [project.urls]
-Homepage = "https://search2o.com"
-Repository = "https://github.com/Search2o/agent-server"
+Homepage = "https://tactet.com"
+Repository = "https://github.com/tactet-ai/agent-server"
 
 [project.scripts]
-search2o = "search2o.main:cli"
+tactet = "tactet.main:cli"
 
 [tool.setuptools.packages.find]
-include = ["search2o*"]
+include = ["tactet*"]
 
 [tool.setuptools.package-data]
-search2o = ["ui/**/*"]
+tactet = ["ui/**/*"]

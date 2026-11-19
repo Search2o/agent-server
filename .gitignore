@@ -1,7 +1,7 @@
 /.idea/
 
 # Bundled UI (built artifact, not source)
-/search2o/ui/
+/tactet/ui/
 
 # Python build artifacts
 __pycache__/

@@ -1,0 +1,202 @@
+# Copyright (c) 2025-present Search2o, Inc.
+# All rights reserved. Proprietary software.
+# Running or operating this software requires valid, ongoing authorization from Search2o.
+# See the LICENSE.md file and https://tactet.com/legal/license.html.
+
+import logging
+import logging.config
+import os
+import re
+import socket
+import uuid
+from http import HTTPStatus
+from pathlib import Path
+
+import httpx
+
+from tactet.common.exceptions import InitializationError, error_message
+from tactet.config.config import Config
+from tactet.models.systemconfig import InitModel
+from importlib.metadata import PackageNotFoundError, version
+
+_LICENSE_ENV = "TACTET_LICENSE_KEY"
+_LICENSE_FILE_ENV = "TACTET_LICENSE_KEY_FILE"
+_LICENSE_PREFIX = "tactet_"
+_LICENSE_KEY_LENGTH = 22
+_LICENSE_KEY = rf"{_LICENSE_PREFIX}[0-9A-Za-z]{{{_LICENSE_KEY_LENGTH}}}"
+_LICENSE_WORD = r"[\x21-\x2E\x30-\x7E]+"
+_LICENSE_PATTERN = re.compile(rf"^{_LICENSE_KEY}(/{_LICENSE_WORD})?$")
+
+_LICENSE_HELP_TEXT = """ \
+    License key
+
+A Tactet license key is required to run the server.
+License keys are obtained from https://tactet.com.
+
+Provide the key with ONE of these environment variables:
+
+- TACTET_LICENSE_KEY
+The license key itself.
+Example:
+TACTET_LICENSE_KEY=your-license-key
+
+- TACTET_LICENSE_KEY_FILE
+The path to a file containing the license key.
+Example:
+TACTET_LICENSE_KEY_FILE=/path/to/license.txt
+
+Setting both is an error. If neither is set, or the key is empty, the server will exit.
+"""
+
+
+class BuildConfig:
+    @classmethod
+    def end(cls, message: str):
+        print_message = f"{message}\n\n{_LICENSE_HELP_TEXT}"
+        raise SystemExit(print_message)
+
+    @classmethod
+    def no_license_message(cls) -> str:
+        return f"One of {_LICENSE_ENV} or {_LICENSE_FILE_ENV} should be set, but neither is."
+
+    @classmethod
+    def get_license(cls) -> tuple[str, str]:
+        key = os.getenv(_LICENSE_ENV, "").strip()
+        path_str = os.getenv(_LICENSE_FILE_ENV, "").strip()
+
+        if key and path_str:
+            raise InitializationError(
+                f"{_LICENSE_ENV} and {_LICENSE_FILE_ENV} are both set. Set one of them, not both.")
+
+        if path_str:
+            path = Path(path_str)
+            if not path.is_file():
+                raise InitializationError(f"License file '{path}' not found")
+            key = path.read_text(encoding="utf-8").strip()
+            if not key:
+                raise InitializationError(f"License file '{path}' is empty")
+
+        if not key:
+            raise InitializationError(cls.no_license_message())
+
+        cls.check_license(key, f"the {_LICENSE_FILE_ENV} file" if path_str else _LICENSE_ENV)
+        lic, _, suffix = key.partition("/")
+        return lic, suffix
+
+    @classmethod
+    def check_license(cls, key: str, source: str) -> None:
+        if _LICENSE_PATTERN.match(key):
+            return
+        lic, slash, suffix = key.partition("/")
+        if not key:
+            problem = "it is empty"
+        elif any(c.isspace() for c in key):
+            problem = "it has spaces or line breaks in it"
+        else:
+            wrong = sorted({c for c in key if not (" " < c <= "~") and c != "/"})
+            if wrong:
+                problem = ("it has characters that a license key never has: "
+                           + ", ".join(repr(c) for c in wrong))
+            elif key.count("/") > 1:
+                problem = "it has more than one '/' in it"
+            elif not lic:
+                problem = "it has nothing before the '/'"
+            elif slash and not suffix:
+                problem = "it has nothing after the '/'"
+            elif not lic.startswith(_LICENSE_PREFIX):
+                problem = f"it does not start with '{_LICENSE_PREFIX}'"
+            elif len(lic) != len(_LICENSE_PREFIX) + _LICENSE_KEY_LENGTH:
+                problem = (f"the part after '{_LICENSE_PREFIX}' is {len(lic) - len(_LICENSE_PREFIX)} "
+                           f"characters long instead of {_LICENSE_KEY_LENGTH}")
+            else:
+                problem = f"the part after '{_LICENSE_PREFIX}' has characters other than letters and numbers"
+        raise InitializationError(
+            f"The license key in {source} is not in the right format, because {problem}. "
+            f"A license key is '{_LICENSE_PREFIX}' followed by {_LICENSE_KEY_LENGTH} letters and numbers, "
+            f"on its own or followed by '/' and a configuration name. "
+            f"Copy it again from https://tactet.com.")
+
+    @classmethod
+    def cloud_refusal(cls, response: httpx.Response) -> InitializationError:
+        try:
+            message = response.json().get("errorMessage")
+        except Exception:
+            message = None
+        if not message:
+            message = ("Invalid license key" if response.status_code == HTTPStatus.FORBIDDEN.value
+                       else "Unexpected licensing error from Tactet. Please report.")
+        return InitializationError(message)
+
+    @classmethod
+    async def get_cloud_url(cls) -> str:
+        headers: dict[str, str] = {
+            "Accept": "application/json",
+            "x-api-key": Config.license,
+        }
+        payload: dict[str, str] = {
+            "clientVersion": Config.client_version,
+            "nodeName": Config.node_name,
+        }
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(Config.whereUrl, headers=headers, json=payload, timeout=httpx.Timeout(20.0))
+                if response.status_code == 200:
+                    url = response.json().get("url")
+                    if not url:
+                        raise InitializationError("Tactet did not say where this account's API is. Please report.")
+                    return url.rstrip("/")
+                raise cls.cloud_refusal(response)
+        except InitializationError:
+            raise
+        except Exception as e:
+            raise InitializationError(f"Could not reach tactet.com to find this account's API: {error_message(e)}")
+
+    @classmethod
+    async def get_config(cls, config_name: str) -> InitModel | None:
+        url = f"{Config.cloudUrl}/init"
+        headers: dict[str, str] = {
+            "Accept": "application/json",
+            "x-api-key": Config.license,
+        }
+        payload: dict[str, str] = {
+            "clientVersion": Config.client_version,
+            "nodeName": Config.node_name,
+            "configName": config_name
+        }
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, headers=headers, json=payload, timeout=httpx.Timeout(20.0))
+                if response.status_code == 200:
+                    ret = response.json()
+                    return InitModel.model_validate(ret.get("init"))
+                raise cls.cloud_refusal(response)
+        except InitializationError:
+            raise
+        except Exception as e:
+            raise InitializationError(f"Could not download configuration from tactet.com: {error_message(e)}")
+
+
+    @classmethod
+    def get_node_name(cls) -> str:
+        return f"{socket.gethostname()}-{str(uuid.uuid4())[:4]}"
+
+    @classmethod
+    async def fetch_and_build(cls) -> bool:
+        try:
+            Config.client_version = version("tactet")
+        except PackageNotFoundError:
+            Config.client_version = "0"
+        Config.license, config_name = cls.get_license()
+        Config.node_name = cls.get_node_name()
+        Config.cloudUrl = await cls.get_cloud_url()
+        Config.init_model = await cls.get_config(config_name)
+        cls.set_loggers()
+        return True
+
+    @classmethod
+    def set_loggers(cls):
+        log_settings = Config.init_model.agentServer.logs
+        if log_settings:
+            logging.config.dictConfig(log_settings)
+

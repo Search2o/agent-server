@@ -1,0 +1,331 @@
+# Copyright (c) 2025-present Search2o, Inc.
+# All rights reserved. Proprietary software.
+# Running or operating this software requires valid, ongoing authorization from Search2o.
+# See the LICENSE.md file and https://tactet.com/legal/license.html.
+
+from __future__ import annotations
+
+import asyncio
+import types
+from typing import Any, ClassVar, TypeVar
+from collections.abc import Awaitable
+
+from fastapi import Request
+from pydantic import BaseModel
+
+from tactet.common.closable import Closable
+from tactet.common.exceptions import ShowMessage, InitializationError
+from tactet.common.mylogger import MyLogger
+from tactet.database.db import Database
+from tactet.execution.agentexec import AgentExec
+from tactet.execution.allowlist import Allowlist
+from tactet.execution.hooks import Hooks
+from tactet.execution.network import Network
+from tactet.execution.secretsmanager import SecretCache
+from tactet.llm.llmcontext import AllLlmContexts
+from tactet.models.configtypes import AuthMethod, SystemConfigPart, AgentConfigPart
+from tactet.models.schemaobjects import ServiceLevel
+from tactet.models.systemconfig import AgentValidationModel, ApiServerModel, DbConnectionModel, \
+    McpServerModel, AgentRuntime, \
+    LlmModel, NamedBaseModel, AgentSecretsModel, EncryptionModel, \
+    AgentConfigModelUnion, ApiConnectionPoolsModel, SysVar
+
+C = TypeVar("C", bound=BaseModel)
+T = TypeVar("T", bound=NamedBaseModel)
+
+
+
+class RuntimeState:
+
+    def __init__(self):
+        self.retired: list[Closable] = []
+
+        self.config_update_at: int
+        self.validation: AgentValidationModel
+        self.secrets_model: AgentSecretsModel
+        self.secret_cache: SecretCache = {}
+        self.encryption_model: EncryptionModel
+        self.allowlist: Allowlist
+        self.sysvar: SysVar
+
+        self.apis: dict[str, ApiServerModel]
+        self.db_service: dict[str, DbConnectionModel]
+        self.llm_options: dict[str, LlmModel]
+        self.mcp_servers: dict[str, McpServerModel]
+
+        self.network: Network | None = None
+        self.db_connections: Database | None = None
+        self.llm_connections: AllLlmContexts | None = None
+
+
+    async def update(self, request: Request, ar: AgentRuntime, prev: RuntimeState):
+        self.config_update_at = ar.updated
+
+        self.validation = self._d2m(ar, SystemConfigPart.validation) if SystemConfigPart.validation in ar.updatedSystemConfigs else prev.validation
+        self.encryption_model = self._d2m(ar, SystemConfigPart.encryption) if SystemConfigPart.encryption in ar.updatedSystemConfigs else prev.encryption_model
+        self.sysvar = self._d2m(ar, SystemConfigPart.sysvar) if SystemConfigPart.sysvar in ar.updatedSystemConfigs else prev.sysvar
+        self.mcp_servers = self._l2d(ar, AgentConfigPart.mcp) if AgentConfigPart.mcp in ar.updatedAgentConfigs else prev.mcp_servers
+
+        new_allowlist_model = self._d2m(ar, SystemConfigPart.allowlist)
+        self.allowlist = Allowlist(new_allowlist_model) if new_allowlist_model is not None else prev.allowlist
+        if new_allowlist_model is not None and self.allowlist.errors:
+            entries = "; ".join(f"{entry.strip()}: {reason}" for entry, reason in self.allowlist.errors.items())
+            MyLogger.error(f"These allowlist entries could not be loaded on this agent server, so agents cannot use "
+                           f"them here: {entries}")
+            from tactet.common.rest_call import RestCall
+            RestCall.report_error_once("Some allowlist entries could not be loaded on this agent server.")
+
+        if SystemConfigPart.secrets in ar.updatedSystemConfigs:
+            self.secrets_model = self._d2m(ar, SystemConfigPart.secrets)
+        else:
+            self.secrets_model = prev.secrets_model
+            self.secret_cache = prev.secret_cache
+
+        if SystemConfigPart.apiConnectionPools in ar.updatedSystemConfigs:
+            api_connection_pools: ApiConnectionPoolsModel = self._d2m(ar, SystemConfigPart.apiConnectionPools)
+            self.network = Network(api_connection_pools)
+            self._retire(prev.network)
+        else:
+            self.network = prev.network
+
+        new_apis = self._l2d(ar, AgentConfigPart.api)
+        self.apis = new_apis if new_apis is not None else prev.apis
+
+        new_dbs = self._l2d(ar, AgentConfigPart.db)
+        self.db_service = new_dbs if new_dbs is not None else prev.db_service
+
+        if new_dbs is not None:
+            self.db_connections = Database(self.validation)
+            self._retire(prev.db_connections)
+        else:
+            self.db_connections = prev.db_connections
+            self.db_connections.validation = self.validation
+
+        new_llm_options = self._l2d(ar, AgentConfigPart.llm)
+        self.llm_options = new_llm_options if new_llm_options is not None else prev.llm_options
+        if new_llm_options is not None:
+            self.llm_connections = AllLlmContexts(self.llm_options, Hooks.llm_adapters)
+        else:
+            self.llm_connections = prev.llm_connections
+
+    def _retire(self, closable: Closable | None):
+        if closable is not None:
+            self.retired.append(closable)
+
+    def in_use(self) -> list[Closable]:
+        return [c for c in (self.network, self.db_connections) if c is not None]
+
+    def start(self, convid: str):
+        Runtime.agent_started(convid)
+
+    def done(self, convid: str):
+        Runtime.agent_done(convid)
+
+    @staticmethod
+    async def execute_expr(ce: str | types.CodeType, d: dict) -> Any:
+        value_name = "_tmp_value_"
+        try:
+            exec(ce, d)
+            if value_name not in d:
+                raise ShowMessage("Unexpected internal error in evaluating an expression.")
+            ret = d[value_name]
+        finally:
+            d.pop(value_name, None)
+            d.pop("_tmp_func_", None)
+        if isinstance(ret, Awaitable):
+            ret = await ret
+        return ret
+
+    @classmethod
+    async def execute(cls, compiled: dict[str, types.CodeType], expr: str, d: dict) -> Any:
+        ce = compiled.get(expr)
+        if not ce:
+            ce = compile(expr, "<string>", "exec")
+            compiled[expr] = ce
+        return await cls.execute_expr(ce, d)
+
+    @staticmethod
+    def _d2m(ar: AgentRuntime, part: SystemConfigPart) -> C | None:
+        return ar.updatedSystemConfigs.get(part)
+
+    @staticmethod
+    def _l2d(ar: AgentRuntime, part: AgentConfigPart) -> dict[str, T] | None:
+        items: list[AgentConfigModelUnion] = ar.updatedAgentConfigs.get(part)
+        if items is not None:
+            result: dict[str, T] = {}
+            for model in items:
+                result[model.name] = model
+            return result
+        else:
+            return None
+
+
+class Runtime:
+    _current: RuntimeState = RuntimeState()
+    account_name: ClassVar[str] = ""
+    service_level: ClassVar[ServiceLevel] = ServiceLevel.free
+    server_ip: ClassVar[str] = ""
+    docs_web: ClassVar[str] = ""
+    password_help: ClassVar[str] = ""
+    auth_method: ClassVar[AuthMethod] = AuthMethod.builtin
+    is_builtin_allowed: ClassVar[bool] = True
+    integration_token_max_age_days: ClassVar[int | None] = None
+    agent_status_updated: ClassVar[int] = 0
+    _update_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
+    _bg_tasks: ClassVar[set[asyncio.Task]] = set()
+    _running: ClassVar[dict[str, int]] = {}
+    _pending: ClassVar[list[tuple[list[Closable], set[str]]]] = []
+
+    @classmethod
+    def track_task(cls, task: asyncio.Task) -> asyncio.Task:
+        cls._bg_tasks.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            cls._bg_tasks.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                MyLogger.warning(f"Background task failed: {t.exception()}")
+
+        task.add_done_callback(_done)
+        return task
+
+    @classmethod
+    async def start_agent_exec(cls, request: Request, config_update_at: int, convid: str) -> RuntimeState:
+        current: RuntimeState = cls._current
+
+        if current.config_update_at is None or current.config_update_at < config_update_at:
+            async with cls._update_lock:
+                current = cls._current
+                if current.config_update_at is None or current.config_update_at < config_update_at:
+                    await cls.update(request, current.config_update_at if current.config_update_at is not None else 0)
+                    current = cls._current
+
+        current.start(convid)
+        return current
+
+    @classmethod
+    def agent_started(cls, convid: str) -> None:
+        cls._running[convid] = cls._running.get(convid, 0) + 1
+
+    @classmethod
+    def agent_done(cls, convid: str) -> None:
+        running = cls._running.get(convid, 0) - 1
+        if running > 0:
+            cls._running[convid] = running
+            return
+        cls._running.pop(convid, None)
+        pending: list[tuple[list[Closable], set[str]]] = []
+        for closables, waiting in cls._pending:
+            waiting.discard(convid)
+            if waiting:
+                pending.append((closables, waiting))
+            else:
+                cls.track_task(asyncio.create_task(cls._close(closables)))
+        cls._pending = pending
+
+    @classmethod
+    def retire(cls, closables: list[Closable]) -> None:
+        if not closables:
+            return
+        waiting = set(cls._running)
+        if waiting:
+            cls._pending.append((closables, waiting))
+        else:
+            cls.track_task(asyncio.create_task(cls._close(closables)))
+
+    @staticmethod
+    async def _close(closables: list[Closable]) -> None:
+        for closable in closables:
+            try:
+                await closable.close()
+            except Exception as e:
+                MyLogger.warning(f"Error closing {type(closable).__name__}: {e}")
+
+    @classmethod
+    async def update(cls, request: Request | None = None, update_at: int = 0):
+        from tactet.common.rest_call import RestCall
+        rt0 = (await RestCall.call_method(request, "getRuntime", {"lastUpdatedAt": update_at,
+                                                                  "lastUpdatedAgentStatus": cls.agent_status_updated})).get("runtime")
+        rt = AgentRuntime.model_validate(rt0)
+        cls.account_name = rt.accountName
+        cls.service_level = rt.serviceLevel
+        cls.server_ip = rt.serverIp
+        cls.docs_web = rt.docsweb
+        cls.password_help = rt.passwordHelp
+        cls.auth_method = rt.authMethod
+        cls.is_builtin_allowed = rt.isBuiltinAllowed
+        cls.integration_token_max_age_days = rt.integrationTokenMaxAgeDays
+        async with cls._agents_lock:
+            cls._remove_stale_agents(rt.agentLastChanged)
+            if rt.agentNames is not None:
+                cls._remove_deleted_agents(set(rt.agentNames))
+        cls.agent_status_updated = rt.agentStatusUpdated
+        if update_at == 0:
+            cls.initial_update_check(rt)
+        state = RuntimeState()
+        await state.update(request, rt, cls._current)
+        cls._current = state
+        cls.retire(state.retired)
+        MyLogger.log(None, "debug", "Agent runtime updated.")
+
+    _agents: ClassVar[dict[str, AgentExec]] = {}
+    _agents_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
+
+    @classmethod
+    async def get_agent(cls, request: Request, name: str) -> AgentExec:
+        from tactet.common.rest_call import RestCall
+        async with cls._agents_lock:
+            agent = cls._agents.get(name)
+            if not agent:
+                obj = await RestCall.call_method(request, "getAgentForExecution", {"agentName": name})
+                const = await AgentExec.decrypt_const(request, cls.current(), name, obj.get("const"))
+                agent = AgentExec(obj.get("agentName"), obj.get("agentTitle"),
+                                  obj.get("agentVersion"), obj.get("agentDefinition"),
+                                  obj.get("maxTime"), obj.get("maxCost"), obj.get("secretsUsed"),
+                                  obj.get("lastChanged") or 0, obj.get("agentPrompts"), const)
+                cls._agents[name] = agent
+            return agent
+
+    @classmethod
+    def _remove_stale_agents(cls, agent_last_changed: dict[str, int]) -> None:
+        for name, last_changed in agent_last_changed.items():
+            agent = cls._agents.get(name)
+            if agent and agent.last_changed != last_changed:
+                cls._agents.pop(name, None)
+
+    @classmethod
+    def _remove_deleted_agents(cls, agent_names: set[str]) -> None:
+        for name in set(cls._agents) - agent_names:
+            cls._agents.pop(name, None)
+
+    @classmethod
+    def current(cls):
+        return cls._current
+
+
+    @classmethod
+    def initial_update_check(cls, ar: AgentRuntime):
+        error = False
+        for p in (SystemConfigPart.allowlist, SystemConfigPart.sysvar, SystemConfigPart.validation, SystemConfigPart.apiConnectionPools):
+            if p not in ar.updatedSystemConfigs:
+                error = True
+        for p in AgentConfigPart:
+            if p not in ar.updatedAgentConfigs:
+                error = True
+        if error:
+            raise InitializationError("Unexpected error in initializing the agent server. Please report.")
+
+    @classmethod
+    async def stop_tasks(cls, grace: float) -> None:
+        if cls._bg_tasks:
+            _, running = await asyncio.wait(set(cls._bg_tasks), timeout=grace)
+            for task in running:
+                task.cancel()
+        while unfinished := [t for t in cls._bg_tasks if not t.done()]:
+            await asyncio.gather(*unfinished, return_exceptions=True)
+
+    @classmethod
+    async def close(cls):
+        pending, cls._pending = cls._pending, []
+        for closables, _ in pending:
+            await cls._close(closables)
+        await cls._close(cls._current.in_use())
